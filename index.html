@@ -193,20 +193,22 @@
 <script>
 const API_URL = "https://script.google.com/macros/s/AKfycbw07o1mU-g27Zp-iXJC67NWDuWr56fAlFHsKTSv0RyjvDrqo1ArKM2RrCr0pWGofInY/exec";
 const COND = ['TV', 'MT', 'TC', 'DE'];
-const NAC = ['CINU', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII'];
 const SEMN = ['CINU', '1er semestre', '2do semestre', '3er semestre', '4to semestre', '5to semestre', '6to semestre', '7mo semestre', '8vo semestre'];
 const rep = a => { const o = { '00': a }; for (let i = 1; i <= 8; i++) o['0' + i] = 'D1 D2'; return o; };
-/* c = código, n = nombre, t = L (larga: CINU–VIII) / C (corta: CINU–IV), s = secciones por semestre */
-const CARRERAS = [
-  { c: '2613', n: 'SISTEMAS', t: 'L', s: { '00': 'D1 D2 D3 N1 N2', '01': 'D1 D2 D3 D4 D5 N1', '02': 'D1 D2', '03': 'D1 D2', '04': 'D1 D2 N1', '05': 'D1 N1', '06': 'D1 N1', '07': 'D1 N1', '08': 'D1 N1' } },
-  { c: '0913', n: 'ADMINISTRACIÓN', t: 'L', s: rep('D1 D2 D3') },
-  { c: '2213', n: 'ELÉCTRICA', t: 'L', s: rep('D1 D2 D3') },
-  { c: '1013', n: 'ECONOMÍA', t: 'L', s: rep('D1 D2 D3') },
-  { c: '2013', n: 'AGRONOMÍA', t: 'L', s: rep('D1 D2') },
-  { c: '0313', n: 'ENFERMERÍA', t: 'C', s: { '00': 'D1 D2 D3 D4 D5 D6 D7', '01': 'D1 D2 D3 D4', '02': 'D1 D2 D3 D4 D5', '03': 'D1 D2 D3 D4 D5 D6 D7', '04': 'D1 D2 D3 D4 D5 D6 D7' } }
+const mk = (c, n, t, s) => ({ c, n, t, s: Object.fromEntries(Object.entries(s).map(([k, v]) => [k, v.split(' ').map(x => k + 'S-' + c + '-' + x)])) });
+/* Respaldo por si la hoja "Listas" no responde. Las listas vigentes se leen de la hoja "Listas" del Google Sheets.
+   c = código, n = nombre, t = L (larga: CINU–VIII) / C (corta: CINU–IV), s = secciones por semestre */
+const NAC = ['CINU', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII'].map((r, i) => i ? 'DEFENSA INTEGRAL DE LA NACIÓN ' + r : 'DEFENSA INTEGRAL CINU');
+let ASIG = { L: NAC, C: NAC.slice(0, 5) };
+let CARRERAS = [
+  mk('2613', 'SISTEMAS', 'L', { '00': 'D1 D2 D3 N1 N2', '01': 'D1 D2 D3 D4 D5 N1', '02': 'D1 D2', '03': 'D1 D2', '04': 'D1 D2 N1', '05': 'D1 N1', '06': 'D1 N1', '07': 'D1 N1', '08': 'D1 N1' }),
+  mk('0913', 'ADMINISTRACIÓN', 'L', rep('D1 D2 D3')),
+  mk('2213', 'ELÉCTRICA', 'L', rep('D1 D2 D3')),
+  mk('1013', 'ECONOMÍA', 'L', rep('D1 D2 D3')),
+  mk('2013', 'AGRONOMÍA', 'L', rep('D1 D2')),
+  mk('0313', 'ENFERMERÍA', 'C', { '00': 'D1 D2 D3 D4 D5 D6 D7', '01': 'D1 D2 D3 D4', '02': 'D1 D2 D3 D4 D5', '03': 'D1 D2 D3 D4 D5 D6 D7', '04': 'D1 D2 D3 D4 D5 D6 D7' })
 ];
-const asignaturas = c => NAC.slice(0, c.t === 'C' ? 5 : 9)
-  .map((r, i) => [i, i === 0 ? 'DEFENSA INTEGRAL CINU' : 'DEFENSA INTEGRAL DE LA NACIÓN ' + r]);
+const asignaturas = c => (ASIG[c.t] || []).map((r, i) => [i, r]);
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -256,6 +258,7 @@ async function cargarOpciones(inicial) {
     if (actual) $('#docente').value = actual;
     if (inicial) {
       const cat = o.catalogos;
+      if (o.listas && o.listas.carreras.length) { CARRERAS = o.listas.carreras; ASIG = o.listas.asig; }
       fill('#nucleo', cat.nucleos); fill('#localidad', cat.localidades, 'Seleccione…');
       fill('#unidad', cat.unidades, 'Seleccione…');
       fill('#carrera', CARRERAS.map(c => [c.c, c.n + ' (' + c.c + ')']), 'Seleccione…');
@@ -283,7 +286,7 @@ $('#asignatura').onchange = () => {
   if (!c || v === '') return limpiarSeccion('Primero elija la asignatura');
   const n = String(v).padStart(2, '0'); SEM = n + 'S';
   $('#semestre').value = SEMN[+v] + ' (' + SEM + ')';
-  const sec = (c.s[n] || '').split(' ').filter(Boolean).map(x => SEM + '-' + c.c + '-' + x);
+  const sec = c.s[n] || [];
   fill('#seccion', sec, sec.length ? 'Seleccione…' : 'Sin secciones registradas');
   $('#seccion').disabled = !sec.length;
 };
