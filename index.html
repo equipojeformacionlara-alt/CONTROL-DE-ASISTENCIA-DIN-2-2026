@@ -1,846 +1,408 @@
-/**
- * CONTROL DE ASISTENCIA DIN – Reporte de clases / Microclases conversatorio
- * ---------------------------------------------------------------------------
- * Script VINCULADO A LA HOJA DE RESPUESTAS del formulario
- * (Formulario > Respuestas > Vincular con Hojas > Extensiones > Apps Script).
- *
- * Qué hace:
- *  1. Mantiene la lista de docentes en una hoja ("Docentes") y la sincroniza con el formulario.
- *  2. Corrige validaciones del formulario (campos numéricos, "no aparece en el listado" opcional, etc.).
- *  3. Valida cada envío: horas, fecha, duplicados, docente, foto, totales.
- *  4. Calcula columnas: total, % asistencia, duración, cédula, condición, estado, alertas.
- *  5. Envía confirmación al docente y alerta al coordinador si hay algo por revisar.
- *  6. Genera hoja "Resumen" (por docente, núcleo, localidad, semestre) y un correo semanal
- *     con los docentes que NO reportaron.
- *
- * Instalación: pegar en el editor, ajustar CONFIG, recargar la hoja y usar el menú
- * "Control DIN" > "1. Instalar / actualizar todo".
- */
-
-// ============================== CONFIGURACIÓN ==============================
-const CONFIG = {
-  FORM_ID: 'https://script.google.com/macros/s/AKfycbxuUDTGZxL3sgybwiB2SByxMOgTP-YqrTovHBF7GwREifWCKWSL6FiA2w3x6X1DcYpb/exec',          // <-- CAMBIAR (está en la URL del formulario)
-  HOJA_RESPUESTAS: '',                 // vacío = detecta "Respuestas de formulario"
-  HOJA_DOCENTES: 'Docentes',
-  HOJA_RESUMEN: 'Resumen',
-  COORDINADOR_EMAIL: 'coordinador@ejemplo.com',   // <-- CAMBIAR
-  ADMINS: [],                          // correos adicionales que pueden gestionar docentes en la interfaz web
-  DIAS_MAX_ANTIGUEDAD: 30,             // fechas más viejas se marcan para revisión
-  DIAS_SIN_REPORTE: 7,                 // ventana del correo semanal
-  TZ: 'America/Caracas',
-  ENVIAR_CONFIRMACION: true,
-  COLOR_REVISAR: '#fde2e1',
-  COLOR_OK: '#ffffff'
-};
-
-// Fragmentos (sin tildes, en mayúsculas) para ubicar columnas por el título de la pregunta
-const CAMPOS = {
-  EMAIL: ['CORREO', 'EMAIL'],
-  DOCENTE: ['NOMBRE Y APELLIDO'],
-  OTRO: ['SI NO APARECE'],
-  NUCLEO: ['NUCLEO'],
-  LOCALIDAD: ['LOCALIDAD'],
-  FECHA: ['FECHA'],
-  INICIO: ['HORA DE INICIO'],
-  SALIDA: ['HORA DE SALIDA'],
-  SEMESTRE: ['SEMESTRE'],
-  CARRERA: ['CODIGO DE CARRERA'],
-  SECCION: ['SECCION'],
-  ASIST: ['ESTUDIANTES ASISTENTES'],
-  FALT: ['ESTUDIANTES FALTANTES'],
-  DESER: ['DESERCION'],
-  TEMA: ['TEMA A TRATAR'],
-  UNIDAD: ['UNIDAD'],
-  OBS: ['OBSERVACION'],
-  IMPACTO: ['IMPACTO'],
-  FOTO: ['RESENA FOTOGRAFICA']
-};
-
-// Columnas calculadas que el script agrega al final de la hoja de respuestas
-const CALC = {
-  TOTAL: 'Total estudiantes',
-  PCT: '% Asistencia',
-  DUR: 'Duración (min)',
-  CED: 'Cédula (normalizada)',
-  COND: 'Condición',
-  ESTADO: 'Estado',
-  ALERTA: 'Alertas'
-};
-
-// Lista inicial de docentes (se vuelca una sola vez a la hoja "Docentes")
-const SEMILLA_DOCENTES = [
-  // Ejemplos ficticios. Los docentes reales se cargan en la hoja "Docentes", no en el repositorio.
-  'Nombre Apellido 12345678 (TV)',
-  'Otro Docente 87654321 (FIJO)'
-];
-
-// ================================ MENÚ ====================================
-function onOpen() {
-  SpreadsheetApp.getUi().createMenu('Control DIN')
-    .addItem('1. Instalar / actualizar todo', 'instalarTodo')
-    .addItem('2. Sincronizar docentes con el formulario', 'actualizarFormulario')
-    .addItem('3. Revalidar todas las respuestas', 'revalidarTodo')
-    .addItem('4. Generar hoja Resumen', 'generarResumen')
-    .addItem('5. Enviar resumen semanal ahora', 'enviarResumenSemanal')
-    .addToUi();
-}
-
-function instalarTodo() {
-  crearHojaDocentes_();
-  prepararHoja_(hojaRespuestas_());
-  actualizarFormulario();
-  instalarTriggers_();
-  SpreadsheetApp.getUi().alert('Listo: hoja Docentes, columnas calculadas, formulario y disparadores configurados.');
-}
-
-function instalarTriggers_() {
-  ScriptApp.getProjectTriggers().forEach(t => {
-    const f = t.getHandlerFunction();
-    if (f === 'alEnviarFormulario' || f === 'enviarResumenSemanal') ScriptApp.deleteTrigger(t);
-  });
-  ScriptApp.newTrigger('alEnviarFormulario')
-    .forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet()).onFormSubmit().create();
-  ScriptApp.newTrigger('enviarResumenSemanal')
-    .timeBased().onWeekDay(ScriptApp.WeekDay.MONDAY).atHour(8).inTimezone(CONFIG.TZ).create();
-}
-
-// ========================= UTILIDADES GENERALES ===========================
-function norm_(s) {
-  return String(s == null ? '' : s).normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-    .replace(/[°º]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
-}
-function num_(x) {
-  const n = parseInt(String(x == null ? '' : x).replace(/\D/g, ''), 10);
-  return isNaN(n) ? null : n;
-}
-function esc_(s) {
-  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-function aMinutos_(s) {
-  const m = String(s == null ? '' : s).trim().match(/^(\d{1,2})[:.](\d{2})(?::\d{2})?\s*([apAP])?/);
-  if (!m) return null;
-  let h = +m[1];
-  const ap = m[3] && m[3].toLowerCase();
-  if (ap === 'p' && h < 12) h += 12;
-  if (ap === 'a' && h === 12) h = 0;
-  return h * 60 + (+m[2]);
-}
-function extraerCedula_(texto) {
-  const m = String(texto || '').match(/\d[\d.,]{5,}/);
-  return m ? m[0].replace(/\D/g, '') : '';
-}
-function hojaRespuestas_() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  if (CONFIG.HOJA_RESPUESTAS) {
-    const s = ss.getSheetByName(CONFIG.HOJA_RESPUESTAS);
-    if (!s) throw new Error('No existe la hoja: ' + CONFIG.HOJA_RESPUESTAS);
-    return s;
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Control de asistencia DIN</title>
+<style>
+  :root {
+    --bg:#f5f6f8; --card:#fff; --txt:#1d2430; --mut:#657084; --line:#dfe3ea;
+    --pri:#1a5fb4; --priTxt:#fff; --ok:#1e7a46; --okBg:#e3f4ea; --bad:#b3261e; --badBg:#fde7e5;
+    --info:#0b5cad; --infoBg:#e4effb;
+    color-scheme: light;
   }
-  return ss.getSheets().find(s => /respuestas|responses/i.test(s.getName())) || ss.getSheets()[0];
-}
-
-// ============================ HOJA DOCENTES ===============================
-function crearHojaDocentes_() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let sh = ss.getSheetByName(CONFIG.HOJA_DOCENTES);
-  if (sh) return sh;
-  sh = ss.insertSheet(CONFIG.HOJA_DOCENTES);
-  const filas = SEMILLA_DOCENTES.map(t => {
-    const m = t.match(/^(.+?)\s*(\d[\d.]*)\s*\((.+)\)\s*$/);
-    return m ? [m[1].trim(), m[2].replace(/\D/g, ''), m[3].trim(), 'SI', 'Inicial'] : [t, '', '', 'SI', 'Inicial'];
-  });
-  sh.getRange(1, 1, 1, 5).setValues([['Nombre y apellido', 'Cédula', 'Condición', 'Activo (SI/NO)', 'Alta']])
-    .setFontWeight('bold').setBackground('#d9ead3');
-  sh.getRange(2, 1, filas.length, 5).setValues(filas);
-  sh.getRange(2, 2, filas.length, 1).setNumberFormat('@');
-  sh.setFrozenRows(1);
-  sh.autoResizeColumns(1, 5);
-  return sh;
-}
-
-function leerDocentes_() {
-  const sh = crearHojaDocentes_();
-  if (sh.getLastRow() < 2) return [];
-  return sh.getRange(2, 1, sh.getLastRow() - 1, 4).getValues()
-    .filter(r => String(r[0]).trim() && String(r[3]).trim().toUpperCase() !== 'NO')
-    .map(r => ({
-      nombre: String(r[0]).trim(),
-      cedula: String(r[1]).replace(/\D/g, ''),
-      condicion: String(r[2]).trim()
-    }))
-    .sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
-}
-
-function mapaDocentes_() {
-  const map = {};
-  leerDocentes_().forEach(d => { if (d.cedula) map[d.cedula] = d; });
-  return map;
-}
-
-// ======================= MEJORAS AL FORMULARIO ============================
-function actualizarFormulario() {
-  const form = FormApp.openById(CONFIG.FORM_ID);
-  const docentes = leerDocentes_();
-  if (!docentes.length) throw new Error('La hoja Docentes está vacía.');
-  const items = form.getItems();
-  const buscar = frag => items.find(it => norm_(it.getTitle()).indexOf(frag) !== -1);
-
-  // 1) Lista de docentes sincronizada con la hoja
-  const itDoc = buscar('NOMBRE Y APELLIDO');
-  if (itDoc) {
-    const etiquetas = docentes.map(d => d.nombre + ' ' + d.cedula + (d.condicion ? ' (' + d.condicion + ')' : ''));
-    if (itDoc.getType() === FormApp.ItemType.MULTIPLE_CHOICE) {
-      itDoc.asMultipleChoiceItem().setChoiceValues(etiquetas).showOtherOption(false);
-    } else if (itDoc.getType() === FormApp.ItemType.LIST) {
-      itDoc.asListItem().setChoiceValues(etiquetas);
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#14171c; --card:#1d222a; --txt:#e8ebf0; --mut:#9aa4b5; --line:#313845;
+      --pri:#6ea8fe; --priTxt:#0b1220; --ok:#6fd49a; --okBg:#1b3a2a; --bad:#ff9b94; --badBg:#43201e;
+      --info:#8ec1ff; --infoBg:#1c2f47;
+      color-scheme: dark;
     }
   }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--txt); }
+  header { padding:14px 18px; background:var(--card); border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; flex:1; }
+  header small { color:var(--mut); }
+  nav { display:flex; gap:4px; padding:10px 18px 0; flex-wrap:wrap; }
+  nav button { border:1px solid var(--line); border-bottom:none; background:transparent; color:var(--mut); padding:9px 16px; border-radius:8px 8px 0 0; cursor:pointer; font:inherit; }
+  nav button.on { background:var(--card); color:var(--txt); font-weight:600; }
+  main { max-width:1100px; margin:0 auto; padding:0 18px 40px; }
+  section { display:none; background:var(--card); border:1px solid var(--line); border-radius:0 10px 10px 10px; padding:18px; }
+  section.on { display:block; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; }
+  .full { grid-column:1/-1; }
+  label { display:block; font-size:12.5px; color:var(--mut); margin-bottom:4px; font-weight:600; }
+  input,select,textarea { width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--txt); font:inherit; }
+  input[readonly] { opacity:.65; }
+  textarea { min-height:70px; resize:vertical; }
+  h3 { margin:22px 0 10px; font-size:14px; text-transform:uppercase; letter-spacing:.04em; color:var(--mut); }
+  h3:first-child { margin-top:0; }
+  button.btn { background:var(--pri); color:var(--priTxt); border:none; padding:10px 18px; border-radius:8px; cursor:pointer; font:inherit; font-weight:600; }
+  button.btn.sec { background:transparent; color:var(--pri); border:1px solid var(--pri); }
+  button.mini { background:transparent; color:var(--pri); border:1px solid var(--line); padding:4px 10px; border-radius:6px; cursor:pointer; font:inherit; font-size:12.5px; margin-right:4px; }
+  button:disabled { opacity:.55; cursor:wait; }
+  .bar { display:flex; gap:10px; flex-wrap:wrap; align-items:end; margin-bottom:14px; }
+  .bar > div { flex:1; min-width:150px; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; margin-bottom:18px; }
+  .kpi { border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .kpi b { display:block; font-size:24px; }
+  .kpi span { color:var(--mut); font-size:12.5px; }
+  .tw { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; }
+  th,td { padding:8px 10px; border-bottom:1px solid var(--line); text-align:left; white-space:nowrap; }
+  th { color:var(--mut); font-size:12px; text-transform:uppercase; }
+  td.wrap { white-space:normal; min-width:180px; }
+  .tag { padding:2px 9px; border-radius:99px; font-size:12px; font-weight:600; }
+  .tag.OK { background:var(--okBg); color:var(--ok); }
+  .tag.REVISAR { background:var(--badBg); color:var(--bad); }
+  .note { background:var(--infoBg); color:var(--info); padding:10px 12px; border-radius:8px; font-size:13.5px; }
+  .box { border:1px dashed var(--line); border-radius:10px; padding:14px; }
+  #msg { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); max-width:92%; padding:12px 18px; border-radius:10px; display:none; z-index:9; box-shadow:0 4px 18px rgba(0,0,0,.25); }
+  #msg.ok { background:var(--okBg); color:var(--ok); display:block; }
+  #msg.bad { background:var(--badBg); color:var(--bad); display:block; }
+  .calc { color:var(--mut); font-size:13px; padding-top:28px; }
+  .hide { display:none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Control de asistencia DIN</h1>
+  <small id="usr"></small>
+  <button class="btn sec" id="btnXlsx">⬇ Descargar Excel</button>
+  <a id="lnkHoja" target="_blank" rel="noopener"><button class="btn sec" type="button">Abrir hoja</button></a>
+</header>
 
-  // 2) "Si no aparece en el listado": opcional y con validación de cédula
-  const itOtro = buscar('SI NO APARECE');
-  if (itOtro) {
-    const v = FormApp.createTextValidation()
-      .setHelpText('Escriba nombre completo y cédula (solo números). Ej.: María Pérez 12345678')
-      .requireTextMatchesPattern('^(?=.*\\d{6,9}).{8,}$').build();
-    itOtro.asTextItem().setRequired(false).setValidation(v);
-  }
+<main>
+<nav>
+  <button class="on" data-t="registro">Registrar clase</button>
+  <button data-t="lista">Registros</button>
+  <button data-t="resumen">Resumen</button>
+  <button data-t="docentes" id="tabDoc" class="hide">Docentes</button>
+</nav>
 
-  // 3) Campos numéricos: enteros de 0 a 9999
-  ['ESTUDIANTES ASISTENTES', 'ESTUDIANTES FALTANTES', 'DESERCION'].forEach(frag => {
-    const it = buscar(frag);
-    if (it && it.getType() === FormApp.ItemType.TEXT) {
-      const v = FormApp.createTextValidation()
-        .setHelpText('Ingrese solo un número entero (0 si no aplica).')
-        .requireTextMatchesPattern('^\\d{1,4}$').build();
-      it.asTextItem().setValidation(v).setRequired(true);
+<!-- ============ REGISTRO ============ -->
+<section id="registro" class="on">
+  <h3>Datos personales</h3>
+  <div class="grid">
+    <div class="full">
+      <label>Nombre y apellido *</label>
+      <select id="docente"></select>
+    </div>
+    <div class="full hide box" id="boxNuevo">
+      <div class="note" style="margin-bottom:12px">Docente nuevo: complete sus datos. Quedará registrado y la próxima vez aparecerá en la lista.</div>
+      <div class="grid">
+        <div><label>Nombres *</label><input id="nNombres" autocomplete="given-name"></div>
+        <div><label>Apellidos *</label><input id="nApellidos" autocomplete="family-name"></div>
+        <div><label>Cédula (solo números) *</label><input id="nCedula" inputmode="numeric" maxlength="10"></div>
+        <div><label>Condición *</label><select id="nCond"></select></div>
+      </div>
+    </div>
+  </div>
+
+  <h3>Información general</h3>
+  <div class="grid">
+    <div><label>Núcleo *</label><select id="nucleo"></select></div>
+    <div><label>Localidad *</label><select id="localidad"></select></div>
+    <div><label>Fecha *</label><input type="date" id="fecha"></div>
+    <div><label>Hora de inicio *</label><input type="time" id="inicio"></div>
+    <div><label>Hora de salida *</label><input type="time" id="salida"></div>
+    <div><label>Semestre *</label><select id="semestre"></select></div>
+    <div><label>Código de carrera *</label><select id="carrera"></select></div>
+    <div><label>N° de sección *</label><select id="seccion"></select></div>
+  </div>
+
+  <h3>Asistencia</h3>
+  <div class="grid">
+    <div><label>Estudiantes asistentes *</label><input type="number" id="asist" min="0" max="9999" inputmode="numeric"></div>
+    <div><label>Estudiantes faltantes *</label><input type="number" id="falt" min="0" max="9999" inputmode="numeric"></div>
+    <div><label>Deserción estudiantil *</label><input type="number" id="deser" min="0" max="9999" value="0" inputmode="numeric"></div>
+    <div class="calc" id="calc">Total: – · Asistencia: –</div>
+  </div>
+
+  <h3>Contenido</h3>
+  <div class="grid">
+    <div class="full"><label>Tema a tratar *</label><input id="tema"></div>
+    <div><label>Unidad *</label><select id="unidad"></select></div>
+    <div class="full"><label>Impacto causado en los estudiantes</label><textarea id="impacto"></textarea></div>
+    <div class="full"><label>Observación (novedad si amerita)</label><textarea id="obs"></textarea></div>
+    <div class="full"><label>Reseña fotográfica (imagen)</label><input type="file" id="foto" accept="image/*"></div>
+  </div>
+
+  <p style="margin-top:20px"><button class="btn" id="btnGuardar">Guardar reporte</button></p>
+</section>
+
+<!-- ============ LISTA ============ -->
+<section id="lista">
+  <div class="bar">
+    <div><label>Buscar docente / sección</label><input id="fTxt" placeholder="Escriba para filtrar"></div>
+    <div><label>Estado</label>
+      <select id="fEst"><option value="">Todos</option><option>OK</option><option>REVISAR</option></select></div>
+    <div style="flex:0"><button class="btn sec" id="btnRef">Actualizar</button></div>
+  </div>
+  <div class="tw"><table>
+    <thead><tr><th>Fila</th><th>Fecha</th><th>Docente</th><th>Localidad</th><th>Carrera</th><th>Sec.</th><th>Asist.</th><th>Falt.</th><th>%</th><th>Estado</th><th>Alertas</th></tr></thead>
+    <tbody id="tbReg"><tr><td colspan="11">Cargando…</td></tr></tbody>
+  </table></div>
+</section>
+
+<!-- ============ RESUMEN ============ -->
+<section id="resumen">
+  <div class="bar">
+    <div><label>Período</label>
+      <select id="rDias"><option value="7">Últimos 7 días</option><option value="30" selected>Últimos 30 días</option><option value="90">Últimos 90 días</option><option value="0">Todo</option></select></div>
+  </div>
+  <div class="kpis" id="kpis"></div>
+  <h3>Por docente</h3>
+  <div class="tw"><table><thead><tr><th>Docente</th><th>Clases</th><th>Asist.</th><th>Falt.</th><th>% Asist.</th><th>Deserción</th><th>Horas</th><th>Por revisar</th></tr></thead><tbody id="tbDoc"></tbody></table></div>
+  <h3>Por localidad</h3>
+  <div class="tw"><table><thead><tr><th>Localidad</th><th>Clases</th><th>Asist.</th><th>Falt.</th><th>% Asist.</th><th>Deserción</th><th>Horas</th><th>Por revisar</th></tr></thead><tbody id="tbLoc"></tbody></table></div>
+</section>
+
+<!-- ============ DOCENTES (ADMIN) ============ -->
+<section id="docentes">
+  <h3 id="dTitulo">Agregar docente</h3>
+  <div class="grid">
+    <div class="full"><label>Nombres y apellidos *</label><input id="dNombre"></div>
+    <div><label>Cédula *</label><input id="dCedula" inputmode="numeric" maxlength="10"></div>
+    <div><label>Condición</label><select id="dCond"></select></div>
+    <div style="align-self:end">
+      <button class="btn" id="btnDGuardar">Guardar docente</button>
+      <button class="btn sec hide" id="btnDCancel">Cancelar</button>
+    </div>
+  </div>
+
+  <h3>Lista de docentes</h3>
+  <div class="bar">
+    <div><label>Buscar</label><input id="dBuscar" placeholder="Nombre o cédula"></div>
+    <div><label>Mostrar</label>
+      <select id="dFiltro"><option value="">Todos</option><option value="1">Activos</option><option value="0">Inactivos</option></select></div>
+  </div>
+  <div class="tw"><table>
+    <thead><tr><th>Nombre</th><th>Cédula</th><th>Condición</th><th>Estado</th><th>Alta</th><th></th></tr></thead>
+    <tbody id="tbDocs"><tr><td colspan="6">Cargando…</td></tr></tbody>
+  </table></div>
+  <p class="note" style="margin-top:14px">Los cambios se reflejan automáticamente en la lista del formulario de Google. Un docente desactivado deja de aparecer, pero sus reportes anteriores se conservan.</p>
+</section>
+</main>
+<div id="msg"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let REGS = [], DOCS = [], msgT;
+
+function aviso(txt, ok) {
+  const m = $('#msg'); m.textContent = txt; m.className = ok ? 'ok' : 'bad';
+  clearTimeout(msgT); msgT = setTimeout(() => m.className = '', 7000);
+}
+function fallo(e) {
+  aviso('Error: ' + (e && e.message ? e.message : e), false);
+  ['#btnGuardar', '#btnXlsx', '#btnDGuardar'].forEach(s => $(s).disabled = false);
+}
+function llenar(id, lista, vacio) {
+  $(id).innerHTML = (vacio ? '<option value="">' + vacio + '</option>' : '') +
+    lista.map(x => '<option value="' + esc(x) + '">' + esc(x) + '</option>').join('');
+}
+
+/* ---------- Pestañas ---------- */
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button,section').forEach(e => e.classList.remove('on'));
+  b.classList.add('on'); $('#' + b.dataset.t).classList.add('on');
+  if (b.dataset.t === 'lista') cargarLista();
+  if (b.dataset.t === 'resumen') cargarResumen();
+  if (b.dataset.t === 'docentes') cargarDocentes();
+});
+
+/* ---------- Inicio ---------- */
+function cargarOpciones(inicial) {
+  google.script.run.withSuccessHandler(o => {
+    const cat = o.catalogos, actual = $('#docente').value;
+    $('#docente').innerHTML = '<option value="">Seleccione…</option>' +
+      o.docentes.map(d => '<option value="' + esc(d.id) + '">' + esc(d.label) + '</option>').join('') +
+      '<option value="__nuevo">Mi nombre no aparece (registrarme como docente nuevo)</option>';
+    if (actual) $('#docente').value = actual;
+    if (inicial) {
+      llenar('#nucleo', cat.nucleos); llenar('#localidad', cat.localidades, 'Seleccione…');
+      llenar('#semestre', cat.semestres, 'Seleccione…'); llenar('#carrera', cat.carreras, 'Seleccione…');
+      llenar('#seccion', cat.secciones, 'Seleccione…'); llenar('#unidad', cat.unidades, 'Seleccione…');
+      llenar('#nCond', cat.condiciones, 'Seleccione…'); llenar('#dCond', cat.condiciones, '(sin definir)');
+      $('#usr').textContent = o.usuario || '';
+      $('#lnkHoja').href = o.urlHoja;
+      $('#tabDoc').classList.toggle('hide', !o.esAdmin);
+      const h = new Date(); h.setMinutes(h.getMinutes() - h.getTimezoneOffset());
+      $('#fecha').value = h.toISOString().slice(0, 10);
     }
-  });
+  }).withFailureHandler(fallo).obtenerOpciones();
+}
+cargarOpciones(true);
 
-  // 4) Mensaje de confirmación
-  form.setConfirmationMessage('Reporte registrado correctamente. Si algún dato requiere revisión, la coordinación se comunicará con usted.');
+$('#docente').onchange = e => $('#boxNuevo').classList.toggle('hide', e.target.value !== '__nuevo');
+
+function calc() {
+  const a = parseInt($('#asist').value), f = parseInt($('#falt').value);
+  if (isNaN(a) || isNaN(f)) { $('#calc').textContent = 'Total: – · Asistencia: –'; return; }
+  const t = a + f;
+  $('#calc').textContent = 'Total: ' + t + ' · Asistencia: ' + (t ? (100 * a / t).toFixed(1) + '%' : '–');
+}
+$('#asist').oninput = $('#falt').oninput = calc;
+
+/* ---------- Foto: se reduce a 1280 px para subirla rápido ---------- */
+function leerFoto(file) {
+  return new Promise((res, rej) => {
+    if (!file) return res(null);
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const k = Math.min(1, 1280 / Math.max(img.width, img.height));
+      const cv = document.createElement('canvas');
+      cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k);
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+      URL.revokeObjectURL(url);
+      res({ data: cv.toDataURL('image/jpeg', 0.82), nombre: file.name.replace(/\.\w+$/, '') + '.jpg', tipo: 'image/jpeg' });
+    };
+    img.onerror = () => rej(new Error('No se pudo leer la imagen'));
+    img.src = url;
+  });
 }
 
-// ===================== PREPARACIÓN DE LA HOJA DE RESPUESTAS ================
-function prepararHoja_(sh) {
-  const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
-  Object.keys(CALC).forEach(k => {
-    if (headers.indexOf(CALC[k]) === -1) {
-      sh.getRange(1, headers.length + 1).setValue(CALC[k]).setFontWeight('bold').setBackground('#d9ead3');
-      headers.push(CALC[k]);
-    }
-  });
-  const c = {};
-  Object.keys(CAMPOS).forEach(k => {
-    const i = headers.findIndex(h => CAMPOS[k].some(f => norm_(h).indexOf(f) !== -1));
-    c[k] = i + 1; // 0 = no encontrada
-  });
-  Object.keys(CALC).forEach(k => { c[k] = headers.indexOf(CALC[k]) + 1; });
-  return c;
-}
-
-// ========================== PROCESO AL ENVIAR ==============================
-function alEnviarFormulario(e) {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(30000);
-  try {
-    const sh = e && e.range ? e.range.getSheet() : hojaRespuestas_();
-    const row = e && e.range ? e.range.getRow() : sh.getLastRow();
-    const ctx = construirContexto_(sh);
-    procesarFila_(sh, row, ctx, true);
-  } finally {
-    lock.releaseLock();
+/* ---------- Guardar reporte ---------- */
+$('#btnGuardar').onclick = async () => {
+  const sel = $('#docente').value;
+  const d = {
+    docenteId: sel === '__nuevo' ? '' : sel,
+    nuevo: null,
+    nucleo: $('#nucleo').value, localidad: $('#localidad').value, fecha: $('#fecha').value,
+    inicio: $('#inicio').value, salida: $('#salida').value, semestre: $('#semestre').value,
+    carrera: $('#carrera').value, seccion: $('#seccion').value,
+    asist: $('#asist').value, falt: $('#falt').value, deser: $('#deser').value || 0,
+    tema: $('#tema').value.trim(), unidad: $('#unidad').value,
+    impacto: $('#impacto').value.trim(), obs: $('#obs').value.trim()
+  };
+  if (!sel) return aviso('Seleccione su nombre en la lista o regístrese como docente nuevo.', false);
+  if (sel === '__nuevo') {
+    d.nuevo = { nombres: $('#nNombres').value.trim(), apellidos: $('#nApellidos').value.trim(),
+      cedula: $('#nCedula').value.replace(/\D/g, ''), condicion: $('#nCond').value };
+    if (!d.nuevo.nombres || !d.nuevo.apellidos) return aviso('Escriba sus nombres y apellidos.', false);
+    if (!/^\d{6,9}$/.test(d.nuevo.cedula)) return aviso('La cédula debe tener entre 6 y 9 dígitos.', false);
+    if (!d.nuevo.condicion) return aviso('Seleccione su condición.', false);
   }
+  const falta = ['fecha','inicio','salida','localidad','semestre','carrera','seccion','asist','falt','tema','unidad'].find(k => !String(d[k]).trim());
+  if (falta) return aviso('Complete los campos obligatorios (*).', false);
+  if (d.salida <= d.inicio) return aviso('La hora de salida debe ser posterior a la de inicio.', false);
+
+  $('#btnGuardar').disabled = true;
+  try { d.foto = await leerFoto($('#foto').files[0]); } catch (e) { return fallo(e); }
+  google.script.run.withSuccessHandler(r => {
+    $('#btnGuardar').disabled = false;
+    const pre = r.registrado ? 'Docente registrado y ' : '';
+    aviso(r.estado === 'OK' ? pre + 'reporte guardado (fila ' + r.fila + ').' : pre + 'reporte guardado con alertas: ' + r.alertas, r.estado === 'OK');
+    ['asist','falt','tema','impacto','obs','inicio','salida','nNombres','nApellidos','nCedula'].forEach(id => $('#' + id).value = '');
+    $('#nCond').value = ''; $('#deser').value = 0; $('#foto').value = ''; calc();
+    if (r.registrado) { cargarOpciones(false); $('#docente').value = ''; $('#boxNuevo').classList.add('hide'); }
+  }).withFailureHandler(fallo).guardarReporte(d);
+};
+
+/* ---------- Lista ---------- */
+function cargarLista() {
+  $('#tbReg').innerHTML = '<tr><td colspan="11">Cargando…</td></tr>';
+  google.script.run.withSuccessHandler(r => { REGS = r; pintarLista(); }).withFailureHandler(fallo).listarRegistros();
 }
-
-function revalidarTodo() {
-  const sh = hojaRespuestas_();
-  const ctx = construirContexto_(sh);
-  for (let r = 2; r <= sh.getLastRow(); r++) procesarFila_(sh, r, ctx, false);
-  SpreadsheetApp.getActiveSpreadsheet().toast('Revalidación terminada', 'Control DIN', 5);
+function pintarLista() {
+  const q = $('#fTxt').value.toLowerCase(), e = $('#fEst').value;
+  const f = REGS.filter(r => (!e || r.estado === e) &&
+    (!q || (r.docente + ' ' + r.seccion + ' ' + r.carrera + ' ' + r.localidad).toLowerCase().includes(q)));
+  $('#tbReg').innerHTML = f.length ? f.map(r =>
+    '<tr><td>' + r.fila + '</td><td>' + esc(r.fecha) + '</td><td>' + esc(r.docente) + '</td><td>' + esc(r.localidad) +
+    '</td><td>' + esc(r.carrera) + '</td><td>' + esc(r.seccion) + '</td><td>' + esc(r.asist) + '</td><td>' + esc(r.falt) +
+    '</td><td>' + esc(r.pct) + '</td><td><span class="tag ' + esc(r.estado) + '">' + esc(r.estado) +
+    '</span></td><td class="wrap">' + esc(r.alertas) + '</td></tr>').join('')
+    : '<tr><td colspan="11">Sin registros.</td></tr>';
 }
+$('#fTxt').oninput = $('#fEst').onchange = pintarLista;
+$('#btnRef').onclick = cargarLista;
 
-function construirContexto_(sh) {
-  const c = prepararHoja_(sh);
-  const ctx = { c: c, docMap: mapaDocentes_(), indice: {} };
-  const n = sh.getLastRow() - 1;
-  if (n < 1) return ctx;
-  const rango = sh.getRange(2, 1, n, sh.getLastColumn());
-  const vals = rango.getValues();
-  const disp = rango.getDisplayValues();
-  vals.forEach((v, i) => {
-    const k = claveFila_(v, disp[i], c);
-    if (k) (ctx.indice[k] = ctx.indice[k] || []).push(i + 2);
-  });
-  return ctx;
+/* ---------- Resumen ---------- */
+function filas(arr) {
+  return arr.length ? arr.map(r => '<tr><td>' + esc(r[0]) + '</td><td>' + r[1] + '</td><td>' + r[2] + '</td><td>' + r[3] +
+    '</td><td>' + (100 * r[4]).toFixed(1) + '%</td><td>' + r[5] + '</td><td>' + r[6] + '</td><td>' + r[7] + '</td></tr>').join('')
+    : '<tr><td colspan="8">Sin datos.</td></tr>';
 }
-
-function claveFila_(vals, disp, c) {
-  const g = (a, k) => (c[k] ? a[c[k] - 1] : '');
-  const ced = extraerCedula_(g(vals, 'DOCENTE')) || extraerCedula_(g(vals, 'OTRO'));
-  if (!ced) return '';
-  return [ced, g(disp, 'FECHA'), g(disp, 'INICIO'), g(disp, 'CARRERA'), g(disp, 'SECCION')].join('|');
+function cargarResumen() {
+  google.script.run.withSuccessHandler(r => {
+    const k = r.kpi;
+    $('#kpis').innerHTML = [['Clases', k.clases], ['Asistentes', k.asist], ['Faltantes', k.falt],
+      ['% Asistencia', (100 * k.pct).toFixed(1) + '%'], ['Horas dictadas', k.horas], ['Por revisar', k.rev]]
+      .map(x => '<div class="kpi"><b>' + x[1] + '</b><span>' + x[0] + '</span></div>').join('');
+    $('#tbDoc').innerHTML = filas(r.docentes); $('#tbLoc').innerHTML = filas(r.localidades);
+  }).withFailureHandler(fallo).obtenerResumen(parseInt($('#rDias').value) || 0);
 }
+$('#rDias').onchange = cargarResumen;
 
-function procesarFila_(sh, row, ctx, notificar) {
-  const c = ctx.c;
-  const lastCol = sh.getLastColumn();
-  const rango = sh.getRange(row, 1, 1, lastCol);
-  const vals = rango.getValues()[0];
-  const disp = rango.getDisplayValues()[0];
-  const v = k => (c[k] ? vals[c[k] - 1] : '');
-  const d = k => (c[k] ? disp[c[k] - 1] : '');
-  const alertas = [];
+/* ---------- Docentes (administración) ---------- */
+function cargarDocentes() {
+  google.script.run.withSuccessHandler(r => { DOCS = r; pintarDocentes(); }).withFailureHandler(fallo).listarDocentesAdmin();
+}
+function pintarDocentes() {
+  const q = $('#dBuscar').value.toLowerCase(), fl = $('#dFiltro').value;
+  const f = DOCS.filter(d => (fl === '' || (fl === '1') === d.activo) && (!q || (d.nombre + ' ' + d.cedula).toLowerCase().includes(q)));
+  $('#tbDocs').innerHTML = f.length ? f.map(d =>
+    '<tr><td>' + esc(d.nombre) + '</td><td>' + esc(d.cedula) + '</td><td>' + esc(d.condicion) +
+    '</td><td><span class="tag ' + (d.activo ? 'OK' : 'REVISAR') + '">' + (d.activo ? 'Activo' : 'Inactivo') +
+    '</span></td><td>' + esc(d.alta) + '</td><td>' +
+    '<button class="mini" data-a="edit" data-c="' + esc(d.cedula) + '">Editar</button>' +
+    '<button class="mini" data-a="toggle" data-c="' + esc(d.cedula) + '" data-v="' + (d.activo ? 0 : 1) + '">' +
+    (d.activo ? 'Desactivar' : 'Activar') + '</button></td></tr>').join('')
+    : '<tr><td colspan="6">Sin docentes.</td></tr>';
+}
+$('#dBuscar').oninput = $('#dFiltro').onchange = pintarDocentes;
 
-  // --- Docente ---
-  const sel = String(v('DOCENTE') || '').trim();
-  const otro = String(v('OTRO') || '').trim();
-  const texto = sel || otro;
-  const cedula = extraerCedula_(sel) || extraerCedula_(otro);
-  const enLista = cedula && ctx.docMap[cedula];
-  let condicion = enLista ? enLista.condicion : '';
-  if (!condicion) {
-    const m = texto.match(/\(([^)]+)\)/);
-    condicion = m ? m[1].trim().toUpperCase() : '';
-  }
-  if (!texto) alertas.push('Sin docente');
-  else if (!cedula) alertas.push('Docente sin cédula válida');
-  else if (!enLista) alertas.push('Docente NO registrado en la hoja Docentes');
-  if (sel && otro) alertas.push('Eligió docente de la lista y además escribió otro');
+function limpiarFormDoc() {
+  $('#dNombre').value = ''; $('#dCedula').value = ''; $('#dCond').value = ''; $('#dCedula').readOnly = false;
+  $('#dTitulo').textContent = 'Agregar docente'; $('#btnDCancel').classList.add('hide');
+}
+$('#btnDCancel').onclick = limpiarFormDoc;
 
-  // --- Fecha ---
-  const fecha = v('FECHA');
-  if (fecha instanceof Date) {
-    const hoy = new Date();
-    const dias = Math.floor((hoy - fecha) / 86400000);
-    if (fecha.getTime() > hoy.getTime() + 86400000) alertas.push('Fecha futura');
-    else if (dias > CONFIG.DIAS_MAX_ANTIGUEDAD) alertas.push('Fecha con más de ' + CONFIG.DIAS_MAX_ANTIGUEDAD + ' días de antigüedad');
+$('#tbDocs').onclick = e => {
+  const b = e.target.closest('button'); if (!b) return;
+  const ced = b.dataset.c;
+  if (b.dataset.a === 'edit') {
+    const d = DOCS.find(x => x.cedula === ced); if (!d) return;
+    $('#dNombre').value = d.nombre; $('#dCedula').value = d.cedula; $('#dCedula').readOnly = true;
+    $('#dCond').value = d.condicion; $('#dTitulo').textContent = 'Editar docente';
+    $('#btnDCancel').classList.remove('hide'); window.scrollTo({ top: 0, behavior: 'smooth' });
   } else {
-    alertas.push('Fecha inválida');
+    const activar = b.dataset.v === '1', d = DOCS.find(x => x.cedula === ced);
+    if (!activar && !confirm('¿Desactivar a ' + d.nombre + '? Dejará de aparecer en la lista de docentes.')) return;
+    b.disabled = true;
+    google.script.run.withSuccessHandler(r => {
+      aviso(r.aviso || r.mensaje, !r.aviso); cargarDocentes(); cargarOpciones(false);
+    }).withFailureHandler(fallo).cambiarEstadoDocente(ced, activar);
   }
-
-  // --- Horas ---
-  const ini = aMinutos_(d('INICIO'));
-  const fin = aMinutos_(d('SALIDA'));
-  let dur = '';
-  if (ini == null || fin == null) alertas.push('Hora inválida');
-  else if (fin <= ini) alertas.push('Hora de salida menor o igual a la de inicio');
-  else {
-    dur = fin - ini;
-    if (dur < 20) alertas.push('Duración menor a 20 min');
-    if (dur > 360) alertas.push('Duración mayor a 6 horas');
-  }
-
-  // --- Estudiantes ---
-  const asist = num_(v('ASIST'));
-  const falt = num_(v('FALT'));
-  const deser = num_(v('DESER'));
-  let total = '', pct = '';
-  if (asist == null || falt == null) alertas.push('Cantidades de estudiantes inválidas');
-  else {
-    total = asist + falt;
-    if (total === 0) alertas.push('Total de estudiantes = 0');
-    else pct = asist / total;
-  }
-  if (deser != null && falt != null && deser > falt) alertas.push('Deserción mayor a inasistentes');
-
-  // --- Foto ---
-  if (c.FOTO && !String(v('FOTO')).trim()) alertas.push('Sin reseña fotográfica');
-
-  // --- Duplicados ---
-  const clave = claveFila_(vals, disp, c);
-  if (clave && ctx.indice[clave] && ctx.indice[clave][0] !== row) {
-    alertas.push('Posible duplicado de la fila ' + ctx.indice[clave][0]);
-  }
-
-  // --- Escritura ---
-  const estado = alertas.length ? 'REVISAR' : 'OK';
-  sh.getRange(row, c.TOTAL).setValue(total);
-  sh.getRange(row, c.PCT).setValue(pct).setNumberFormat('0.0%');
-  sh.getRange(row, c.DUR).setValue(dur);
-  sh.getRange(row, c.CED).setNumberFormat('@').setValue(cedula);
-  sh.getRange(row, c.COND).setValue(condicion);
-  sh.getRange(row, c.ESTADO).setValue(estado);
-  sh.getRange(row, c.ALERTA).setValue(alertas.join(' | '));
-  sh.getRange(row, 1, 1, c.ALERTA).setBackground(estado === 'OK' ? CONFIG.COLOR_OK : CONFIG.COLOR_REVISAR);
-
-  if (notificar) {
-    const info = {
-      docente: enLista ? enLista.nombre : texto, fecha: d('FECHA'), inicio: d('INICIO'), salida: d('SALIDA'),
-      carrera: d('CARRERA'), seccion: d('SECCION'), asist: asist, falt: falt, tema: v('TEMA'), unidad: v('UNIDAD'),
-      estado: estado, alertas: alertas
-    };
-    try {
-      if (CONFIG.ENVIAR_CONFIRMACION) enviarConfirmacion_(String(v('EMAIL') || '').trim(), info);
-      if (estado === 'REVISAR') alertarCoordinador_(sh, row, info);
-    } catch (err) {
-      console.error('Error enviando correo: ' + err);
-    }
-  }
-}
-
-// ============================== CORREOS ===================================
-function enviarConfirmacion_(email, i) {
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return;
-  const html = '<p>Su reporte de clase fue recibido.</p><ul>' +
-    '<li><b>Docente:</b> ' + esc_(i.docente) + '</li>' +
-    '<li><b>Fecha:</b> ' + esc_(i.fecha) + ' (' + esc_(i.inicio) + ' – ' + esc_(i.salida) + ')</li>' +
-    '<li><b>Carrera / Sección:</b> ' + esc_(i.carrera) + ' / ' + esc_(i.seccion) + '</li>' +
-    '<li><b>Asistentes / Faltantes:</b> ' + esc_(i.asist) + ' / ' + esc_(i.falt) + '</li>' +
-    '<li><b>Tema:</b> ' + esc_(i.tema) + ' (' + esc_(i.unidad) + ')</li></ul>' +
-    (i.estado === 'REVISAR'
-      ? '<p><b>Atención:</b> el sistema detectó puntos por revisar: ' + esc_(i.alertas.join('; ')) + '.</p>'
-      : '<p>Validación automática: OK.</p>');
-  MailApp.sendEmail({ to: email, subject: 'Confirmación de reporte de clase DIN', htmlBody: html });
-}
-
-function alertarCoordinador_(sh, row, i) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const url = ss.getUrl() + '#gid=' + sh.getSheetId() + '&range=A' + row;
-  MailApp.sendEmail({
-    to: CONFIG.COORDINADOR_EMAIL,
-    subject: 'Reporte DIN por revisar – ' + i.docente,
-    htmlBody: '<p>Fila <a href="' + url + '">' + row + '</a> con alertas:</p><ul>' +
-      i.alertas.map(a => '<li>' + esc_(a) + '</li>').join('') + '</ul>'
-  });
-}
-
-// ============================ RESUMEN / REPORTES ==========================
-function leerRegistros_(sh) {
-  const c = prepararHoja_(sh);
-  const n = sh.getLastRow() - 1;
-  if (n < 1) return [];
-  const vals = sh.getRange(2, 1, n, sh.getLastColumn()).getValues();
-  const g = (r, k) => (c[k] ? r[c[k] - 1] : '');
-  return vals.filter(r => g(r, 'FECHA') instanceof Date).map(r => ({
-    docente: String(g(r, 'DOCENTE') || g(r, 'OTRO')).replace(/\s*\d[\d.,]{5,}.*$/, '').trim(),
-    ced: String(g(r, 'CED')),
-    cond: g(r, 'COND'),
-    nucleo: g(r, 'NUCLEO'),
-    localidad: g(r, 'LOCALIDAD'),
-    semestre: g(r, 'SEMESTRE'),
-    fecha: g(r, 'FECHA'),
-    asist: num_(g(r, 'ASIST')) || 0,
-    falt: num_(g(r, 'FALT')) || 0,
-    deser: num_(g(r, 'DESER')) || 0,
-    dur: Number(g(r, 'DUR')) || 0,
-    estado: g(r, 'ESTADO')
-  }));
-}
-
-function agrupar_(regs, fnClave) {
-  const m = {};
-  regs.forEach(r => {
-    const k = fnClave(r) || '(sin dato)';
-    const a = m[k] = m[k] || { clases: 0, asist: 0, falt: 0, deser: 0, min: 0, rev: 0 };
-    a.clases++; a.asist += r.asist; a.falt += r.falt; a.deser += r.deser; a.min += r.dur;
-    if (r.estado === 'REVISAR') a.rev++;
-  });
-  return Object.keys(m).sort().map(k => {
-    const a = m[k], t = a.asist + a.falt;
-    return [k, a.clases, a.asist, a.falt, t ? a.asist / t : 0, a.deser, Math.round(a.min / 6) / 10, a.rev];
-  });
-}
-
-function generarResumen() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const regs = leerRegistros_(hojaRespuestas_());
-  let sh = ss.getSheetByName(CONFIG.HOJA_RESUMEN) || ss.insertSheet(CONFIG.HOJA_RESUMEN);
-  sh.clear();
-  const enc = ['Grupo', 'Clases', 'Asistentes', 'Faltantes', '% Asistencia', 'Deserción', 'Horas dictadas', 'Por revisar'];
-  let fila = 1;
-  sh.getRange(fila, 1).setValue('RESUMEN CONTROL DE ASISTENCIA DIN').setFontSize(14).setFontWeight('bold');
-  sh.getRange(fila + 1, 1).setValue('Generado: ' + Utilities.formatDate(new Date(), CONFIG.TZ, 'dd/MM/yyyy HH:mm') +
-    ' · Registros: ' + regs.length);
-  fila += 3;
-
-  const tablas = [
-    ['Por docente', r => r.docente + (r.cond ? ' (' + r.cond + ')' : '')],
-    ['Por núcleo', r => r.nucleo],
-    ['Por localidad', r => r.localidad],
-    ['Por semestre', r => r.semestre],
-    ['Por mes', r => Utilities.formatDate(r.fecha, CONFIG.TZ, 'yyyy-MM')]
-  ];
-  tablas.forEach(t => {
-    const filas = agrupar_(regs, t[1]);
-    sh.getRange(fila, 1).setValue(t[0]).setFontWeight('bold').setFontSize(12);
-    sh.getRange(fila + 1, 1, 1, enc.length).setValues([enc]).setFontWeight('bold').setBackground('#d9ead3');
-    if (filas.length) {
-      sh.getRange(fila + 2, 1, filas.length, enc.length).setValues(filas);
-      sh.getRange(fila + 2, 5, filas.length, 1).setNumberFormat('0.0%');
-    }
-    fila += filas.length + 4;
-  });
-  sh.autoResizeColumns(1, enc.length);
-  sh.setColumnWidth(1, 300);
-  ss.setActiveSheet(sh);
-}
-
-function enviarResumenSemanal() {
-  const regs = leerRegistros_(hojaRespuestas_());
-  const desde = new Date(Date.now() - CONFIG.DIAS_SIN_REPORTE * 86400000);
-  const recientes = regs.filter(r => r.fecha >= desde);
-  const reportaron = {};
-  recientes.forEach(r => { reportaron[r.ced] = (reportaron[r.ced] || 0) + 1; });
-
-  const sinReporte = leerDocentes_().filter(dc => !reportaron[dc.cedula]);
-  const asist = recientes.reduce((s, r) => s + r.asist, 0);
-  const falt = recientes.reduce((s, r) => s + r.falt, 0);
-  const pct = asist + falt ? (100 * asist / (asist + falt)).toFixed(1) + '%' : 'N/D';
-  const rev = recientes.filter(r => r.estado === 'REVISAR').length;
-
-  const html = '<h3>Resumen semanal – Control de asistencia DIN</h3>' +
-    '<p>Período: últimos ' + CONFIG.DIAS_SIN_REPORTE + ' días.</p><ul>' +
-    '<li>Clases reportadas: <b>' + recientes.length + '</b></li>' +
-    '<li>Asistentes: <b>' + asist + '</b> · Faltantes: <b>' + falt + '</b> · Asistencia: <b>' + pct + '</b></li>' +
-    '<li>Reportes por revisar: <b>' + rev + '</b></li></ul>' +
-    '<h4>Docentes sin reporte (' + sinReporte.length + ')</h4>' +
-    (sinReporte.length
-      ? '<ul>' + sinReporte.map(dc => '<li>' + esc_(dc.nombre) + ' – ' + esc_(dc.cedula) + ' (' + esc_(dc.condicion) + ')</li>').join('') + '</ul>'
-      : '<p>Todos los docentes activos reportaron.</p>') +
-    '<p><i>Nota: quienes notificaron inasistencia por el otro formulario pueden aparecer aquí.</i></p>';
-
-  MailApp.sendEmail({
-    to: CONFIG.COORDINADOR_EMAIL,
-    subject: 'Resumen semanal DIN – ' + Utilities.formatDate(new Date(), CONFIG.TZ, 'dd/MM/yyyy'),
-    htmlBody: html
-  });
-}
-
-// ===================== WEB APP (INTERFAZ HTML) =====================
-/**
- * WEB APP – Interfaz HTML del Control de asistencia DIN
- * Archivo del MISMO proyecto de Apps Script (junto a ControlAsistenciaDIN.gs e Index.html).
- *
- * Incluye:
- *  - Registro de clases.
- *  - Auto-registro de docentes nuevos (se dan de alta al reportar su primera clase).
- *  - Gestión de docentes (agregar, editar, activar/desactivar) solo para administradores.
- */
-
-const CATALOGOS = {
-  nucleos: ['LARA'],
-  localidades: ['UNEFA LARA DE LA 25', 'UNEFA LARA DE LA 51', 'UNEFA LARA DE LA 57'],
-  semestres: ['00S', '01S', '02S', '03S', '04S', '05S', '06S', '07S', '08S'],
-  carreras: ['2613', '2213', '0313', '0913', '1013', '2013'],
-  secciones: ['D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'N1', 'N2', 'N3', 'N4', 'N5'],
-  unidades: ['UNIDAD 1', 'UNIDAD 2', 'UNIDAD 3', 'UNIDAD 4', 'UNIDAD 5', 'UNIDAD 6', 'UNIDAD 7'],
-  condiciones: ['TV', 'FIJO', 'ORDINARIO', 'CONTRATADO', 'HP']
 };
-const CARPETA_FOTOS = 'Reseñas fotográficas DIN';
 
-function doGet() {
-  return HtmlService.createHtmlOutputFromFile('Index')
-    .setTitle('Control de asistencia DIN')
-    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
-}
+$('#btnDGuardar').onclick = () => {
+  const d = { nombre: $('#dNombre').value.trim(), cedula: $('#dCedula').value.replace(/\D/g, ''), condicion: $('#dCond').value };
+  if (!d.nombre || !d.cedula) return aviso('Escriba nombre y cédula.', false);
+  $('#btnDGuardar').disabled = true; aviso('Guardando y sincronizando con el formulario…', true);
+  google.script.run.withSuccessHandler(r => {
+    $('#btnDGuardar').disabled = false; aviso(r.aviso || r.mensaje, !r.aviso);
+    limpiarFormDoc(); cargarDocentes(); cargarOpciones(false);
+  }).withFailureHandler(fallo).guardarDocente(d);
+};
 
-function obtenerOpciones() {
-  return {
-    docentes: leerDocentes_().map(d => ({
-      id: d.cedula,
-      label: d.nombre + ' · ' + d.cedula + (d.condicion ? ' (' + d.condicion + ')' : '')
-    })),
-    catalogos: CATALOGOS,
-    usuario: Session.getActiveUser().getEmail(),
-    esAdmin: esAdmin_(),
-    urlHoja: SpreadsheetApp.getActiveSpreadsheet().getUrl()
-  };
-}
-
-// ============================ PERMISOS ====================================
-function esAdmin_() {
-  const me = String(Session.getActiveUser().getEmail() || '').toLowerCase();
-  if (!me) return false;
-  return [CONFIG.COORDINADOR_EMAIL].concat(CONFIG.ADMINS || [])
-    .some(e => String(e).toLowerCase() === me);
-}
-function exigirAdmin_() {
-  if (!esAdmin_()) throw new Error('Solo la coordinación puede realizar esta acción.');
-}
-
-// ============================ DOCENTES ====================================
-function titulo_(s) {
-  return String(s || '').trim().replace(/\s+/g, ' ').toLowerCase()
-    .replace(/(^|\s)(\S)/g, (m, a, b) => a + b.toUpperCase());
-}
-
-/** Hoja Docentes con la columna "Alta" garantizada (A:Nombre B:Cédula C:Condición D:Activo E:Alta). */
-function hojaDocentes_() {
-  const sh = crearHojaDocentes_();
-  if (sh.getMaxColumns() < 5) sh.insertColumnsAfter(sh.getMaxColumns(), 5 - sh.getMaxColumns());
-  if (!sh.getRange(1, 5).getValue()) {
-    sh.getRange(1, 5).setValue('Alta').setFontWeight('bold').setBackground('#d9ead3');
-  }
-  return sh;
-}
-
-function buscarDocente_(ced) {
-  const sh = hojaDocentes_();
-  const n = sh.getLastRow() - 1;
-  if (n < 1) return null;
-  const vals = sh.getRange(2, 1, n, 5).getValues();
-  for (let i = 0; i < n; i++) {
-    if (String(vals[i][1]).replace(/\D/g, '') === ced) {
-      return {
-        fila: i + 2, nombre: String(vals[i][0]).trim(), cedula: ced,
-        condicion: String(vals[i][2]).trim(),
-        activo: String(vals[i][3]).trim().toUpperCase() !== 'NO'
-      };
-    }
-  }
-  return null;
-}
-
-function validarDocente_(d) {
-  const ced = String(d.cedula || '').replace(/\D/g, '');
-  if (!/^\d{6,9}$/.test(ced)) throw new Error('La cédula debe tener entre 6 y 9 dígitos.');
-  const nombre = titulo_(d.nombre);
-  if (nombre.split(' ').length < 2) throw new Error('Escriba nombres y apellidos.');
-  const cond = String(d.condicion || '').trim().toUpperCase();
-  if (cond && CATALOGOS.condiciones.indexOf(cond) === -1) throw new Error('Condición no válida.');
-  return { ced: ced, nombre: nombre, cond: cond };
-}
-
-/** Agrega un docente nuevo (sin bloqueo propio: el que llama debe tener el LockService). */
-function agregarDocente_(d, origen) {
-  const v = validarDocente_(d);
-  if (buscarDocente_(v.ced)) throw new Error('Ya existe un docente con esa cédula.');
-  const sh = hojaDocentes_();
-  const fila = sh.getLastRow() + 1;
-  sh.getRange(fila, 2).setNumberFormat('@');
-  sh.getRange(fila, 1, 1, 5).setValues([[
-    v.nombre, v.ced, v.cond, 'SI',
-    origen + ' ' + Utilities.formatDate(new Date(), CONFIG.TZ, 'dd/MM/yyyy')
-  ]]);
-  return { fila: fila, nombre: v.nombre, cedula: v.ced, condicion: v.cond, activo: true };
-}
-
-/** Mantiene la lista del formulario de Google igual a la hoja Docentes. Devuelve '' o un aviso. */
-function sincronizarFormulario_() {
-  try {
-    actualizarFormulario();
-    return '';
-  } catch (e) {
-    return 'Guardado, pero no se pudo sincronizar el formulario (' + e.message +
-      '). Use el menú Control DIN → Sincronizar docentes.';
-  }
-}
-
-// ---------- Gestión (solo administradores) ----------
-function listarDocentesAdmin() {
-  exigirAdmin_();
-  const sh = hojaDocentes_();
-  const n = sh.getLastRow() - 1;
-  if (n < 1) return [];
-  return sh.getRange(2, 1, n, 5).getDisplayValues()
-    .map(r => ({
-      nombre: r[0], cedula: String(r[1]).replace(/\D/g, ''), condicion: r[2],
-      activo: String(r[3]).trim().toUpperCase() !== 'NO', alta: r[4]
-    }))
-    .filter(d => d.nombre)
-    .sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
-}
-
-/** Agrega un docente o, si la cédula ya existe, actualiza nombre y condición. */
-function guardarDocente(d) {
-  exigirAdmin_();
-  const lock = LockService.getScriptLock();
-  lock.waitLock(30000);
-  let mensaje;
-  try {
-    const v = validarDocente_(d);
-    const ex = buscarDocente_(v.ced);
-    if (ex) {
-      const sh = hojaDocentes_();
-      sh.getRange(ex.fila, 1).setValue(v.nombre);
-      sh.getRange(ex.fila, 3).setValue(v.cond);
-      mensaje = 'Docente actualizado.';
-    } else {
-      agregarDocente_(d, 'Admin');
-      mensaje = 'Docente agregado.';
-    }
-  } finally {
-    lock.releaseLock();
-  }
-  return { mensaje: mensaje, aviso: sincronizarFormulario_() };
-}
-
-function cambiarEstadoDocente(cedula, activo) {
-  exigirAdmin_();
-  const lock = LockService.getScriptLock();
-  lock.waitLock(30000);
-  try {
-    const ex = buscarDocente_(String(cedula).replace(/\D/g, ''));
-    if (!ex) throw new Error('Docente no encontrado.');
-    hojaDocentes_().getRange(ex.fila, 4).setValue(activo ? 'SI' : 'NO');
-  } finally {
-    lock.releaseLock();
-  }
-  return { mensaje: activo ? 'Docente activado.' : 'Docente desactivado.', aviso: sincronizarFormulario_() };
-}
-
-// ============================ GUARDAR REPORTE =============================
-function guardarReporte(d) {
-  const req = ['fecha', 'inicio', 'salida', 'nucleo', 'localidad', 'semestre', 'carrera',
-    'seccion', 'asist', 'falt', 'tema', 'unidad'];
-  req.forEach(k => {
-    if (d[k] === undefined || String(d[k]).trim() === '') throw new Error('Falta el campo: ' + k);
-  });
-  if (!d.docenteId && !d.nuevo) throw new Error('Seleccione un docente o regístrese.');
-  if (!d.docenteId && d.nuevo && !String(d.nuevo.condicion || '').trim()) {
-    throw new Error('Seleccione su condición.');
-  }
-
-  let registrado = false, sincroniza = false;
-  const lock = LockService.getScriptLock();
-  lock.waitLock(30000);
-  let resultado;
-  try {
-    // 1) Docente: de la lista o auto-registro
-    let doc = d.docenteId ? mapaDocentes_()[d.docenteId] : null;
-    if (!doc && d.nuevo) {
-      const v = validarDocente_({
-        nombre: String(d.nuevo.nombres || '') + ' ' + String(d.nuevo.apellidos || ''),
-        cedula: d.nuevo.cedula, condicion: d.nuevo.condicion
-      });
-      const ex = buscarDocente_(v.ced);
-      if (ex) {
-        if (!ex.activo) throw new Error('Esta cédula figura como inactiva. Comuníquese con la coordinación.');
-        doc = ex; // ya estaba registrado: se usa el existente
-      } else {
-        doc = agregarDocente_({ nombre: v.nombre, cedula: v.ced, condicion: v.cond }, 'Auto-registro');
-        registrado = true;
-      }
-    }
-    if (!doc) throw new Error('Docente no encontrado en la lista.');
-
-    // 2) Fila del reporte
-    const sh = hojaRespuestas_();
-    const c = prepararHoja_(sh);
-    const fila = new Array(sh.getLastColumn()).fill('');
-    const set = (k, val) => { if (c[k]) fila[c[k] - 1] = val; };
-    const f = String(d.fecha).split('-').map(Number);
-    fila[0] = new Date();
-    set('EMAIL', Session.getActiveUser().getEmail());
-    set('DOCENTE', doc.nombre + ' ' + doc.cedula + (doc.condicion ? ' (' + doc.condicion + ')' : ''));
-    set('OTRO', '');
-    set('NUCLEO', d.nucleo);
-    set('LOCALIDAD', d.localidad);
-    set('FECHA', new Date(f[0], f[1] - 1, f[2], 12, 0, 0));
-    set('INICIO', d.inicio);
-    set('SALIDA', d.salida);
-    set('SEMESTRE', d.semestre);
-    set('CARRERA', d.carrera);
-    set('SECCION', d.seccion);
-    set('ASIST', num_(d.asist));
-    set('FALT', num_(d.falt));
-    set('DESER', num_(d.deser) || 0);
-    set('IMPACTO', d.impacto || '');
-    set('TEMA', d.tema);
-    set('UNIDAD', d.unidad);
-    set('OBS', d.obs || '');
-    if (d.foto && d.foto.data) set('FOTO', guardarFoto_(d.foto));
-
-    sh.appendRow(fila);
-    const row = sh.getLastRow();
-    procesarFila_(sh, row, construirContexto_(sh), true);
-    resultado = {
-      fila: row,
-      estado: sh.getRange(row, c.ESTADO).getValue(),
-      alertas: String(sh.getRange(row, c.ALERTA).getValue() || ''),
-      registrado: registrado,
-      docente: doc.nombre
-    };
-    sincroniza = registrado;
-  } finally {
-    lock.releaseLock();
-  }
-
-  // 3) Si hubo alta nueva: actualizar el formulario de Google y avisar a la coordinación
-  if (sincroniza) {
-    sincronizarFormulario_();
-    try {
-      MailApp.sendEmail({
-        to: CONFIG.COORDINADOR_EMAIL,
-        subject: 'Nuevo docente registrado: ' + resultado.docente,
-        htmlBody: '<p>' + esc_(resultado.docente) + ' se registró desde la interfaz web al reportar su primera clase.</p>' +
-          '<p>Puede revisarlo, editarlo o desactivarlo en la pestaña <b>Docentes</b> de la aplicación.</p>'
-      });
-    } catch (err) {
-      console.error('Aviso de nuevo docente: ' + err);
-    }
-  }
-  return resultado;
-}
-
-function guardarFoto_(foto) {
-  const it = DriveApp.getFoldersByName(CARPETA_FOTOS);
-  const carpeta = it.hasNext() ? it.next() : DriveApp.createFolder(CARPETA_FOTOS);
-  const bytes = Utilities.base64Decode(String(foto.data).split(',').pop());
-  const nombre = Utilities.formatDate(new Date(), CONFIG.TZ, 'yyyyMMdd_HHmmss') + '_' +
-    String(foto.nombre || 'foto').replace(/[^\w.\-]/g, '_');
-  const archivo = carpeta.createFile(Utilities.newBlob(bytes, foto.tipo || 'image/jpeg', nombre));
-  return archivo.getUrl();
-}
-
-// ============================== CONSULTAS =================================
-function listarRegistros() {
-  const sh = hojaRespuestas_();
-  const c = prepararHoja_(sh);
-  const last = sh.getLastRow();
-  if (last < 2) return [];
-  const desde = Math.max(2, last - 499); // últimos 500
-  const disp = sh.getRange(desde, 1, last - desde + 1, sh.getLastColumn()).getDisplayValues();
-  const g = (r, k) => (c[k] ? r[c[k] - 1] : '');
-  return disp.map((r, i) => ({
-    fila: desde + i,
-    fecha: g(r, 'FECHA'),
-    docente: g(r, 'DOCENTE') || g(r, 'OTRO'),
-    localidad: g(r, 'LOCALIDAD'),
-    carrera: g(r, 'CARRERA'),
-    seccion: g(r, 'SECCION'),
-    asist: g(r, 'ASIST'),
-    falt: g(r, 'FALT'),
-    pct: g(r, 'PCT'),
-    estado: g(r, 'ESTADO'),
-    alertas: g(r, 'ALERTA')
-  })).reverse();
-}
-
-function obtenerResumen(dias) {
-  let regs = leerRegistros_(hojaRespuestas_());
-  if (dias) {
-    const desde = new Date(Date.now() - dias * 86400000);
-    regs = regs.filter(r => r.fecha >= desde);
-  }
-  const asist = regs.reduce((s, r) => s + r.asist, 0);
-  const falt = regs.reduce((s, r) => s + r.falt, 0);
-  return {
-    kpi: {
-      clases: regs.length,
-      asist: asist,
-      falt: falt,
-      pct: asist + falt ? asist / (asist + falt) : 0,
-      rev: regs.filter(r => r.estado === 'REVISAR').length,
-      horas: Math.round(regs.reduce((s, r) => s + r.dur, 0) / 6) / 10
-    },
-    docentes: agrupar_(regs, r => r.docente),
-    localidades: agrupar_(regs, r => r.localidad)
-  };
-}
-
-// ================================ EXCEL ===================================
-/** Exporta TODO el libro (respuestas, docentes, resumen) como .xlsx y lo devuelve en base64. */
-function exportarExcel() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  DriveApp.getFileById(ss.getId()).getName(); // fuerza el permiso de Drive necesario para exportar
-  const resp = UrlFetchApp.fetch(
-    'https://docs.google.com/spreadsheets/d/' + ss.getId() + '/export?format=xlsx',
-    { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true }
-  );
-  if (resp.getResponseCode() !== 200) throw new Error('No se pudo exportar (HTTP ' + resp.getResponseCode() + ')');
-  return {
-    nombre: 'Control_Asistencia_DIN_' + Utilities.formatDate(new Date(), CONFIG.TZ, 'yyyyMMdd_HHmm') + '.xlsx',
-    base64: Utilities.base64Encode(resp.getBlob().getBytes())
-  };
-}
+/* ---------- Excel ---------- */
+$('#btnXlsx').onclick = () => {
+  $('#btnXlsx').disabled = true; aviso('Generando Excel…', true);
+  google.script.run.withSuccessHandler(r => {
+    const bin = atob(r.base64), bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+    a.download = r.nombre; document.body.appendChild(a); a.click(); a.remove();
+    $('#btnXlsx').disabled = false; aviso('Excel descargado: ' + r.nombre, true);
+  }).withFailureHandler(fallo).exportarExcel();
+};
+</script>
+</body>
+</html>
