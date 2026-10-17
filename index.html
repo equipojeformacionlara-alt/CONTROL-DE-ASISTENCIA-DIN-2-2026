@@ -189,9 +189,23 @@
 <div id="msg"></div>
 
 <script>
+const API_URL = "https://script.google.com/macros/s/AKfycbw07o1mU-g27Zp-iXJC67NWDuWr56fAlFHsKTSv0RyjvDrqo1ArKM2RrCr0pWGofInY/exec";
+
 const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 let REGS = [], DOCS = [], msgT;
+
+async function apiCall(action, payload = {}) {
+  const resp = await fetch(API_URL, {
+    method: 'POST',
+    mode: 'cors',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ action, payload })
+  });
+  const res = await resp.json();
+  if (res.status === 'error') throw new Error(res.message);
+  return res.data;
+}
 
 function aviso(txt, ok) {
   const m = $('#msg'); m.textContent = txt; m.className = ok ? 'ok' : 'bad';
@@ -199,7 +213,7 @@ function aviso(txt, ok) {
 }
 function fallo(e) {
   aviso('Error: ' + (e && e.message ? e.message : e), false);
-  ['#btnGuardar', '#btnXlsx', '#btnDGuardar'].forEach(s => $(s).disabled = false);
+  ['#btnGuardar', '#btnXlsx', '#btnDGuardar'].forEach(s => { if($(s)) $(s).disabled = false; });
 }
 function llenar(id, lista, vacio) {
   $(id).innerHTML = (vacio ? '<option value="">' + vacio + '</option>' : '') +
@@ -216,8 +230,9 @@ document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
 });
 
 /* ---------- Inicio ---------- */
-function cargarOpciones(inicial) {
-  google.script.run.withSuccessHandler(o => {
+async function cargarOpciones(inicial) {
+  try {
+    const o = await apiCall('obtenerOpciones');
     const cat = o.catalogos, actual = $('#docente').value;
     $('#docente').innerHTML = '<option value="">Seleccione…</option>' +
       o.docentes.map(d => '<option value="' + esc(d.id) + '">' + esc(d.label) + '</option>').join('') +
@@ -234,7 +249,7 @@ function cargarOpciones(inicial) {
       const h = new Date(); h.setMinutes(h.getMinutes() - h.getTimezoneOffset());
       $('#fecha').value = h.toISOString().slice(0, 10);
     }
-  }).withFailureHandler(fallo).obtenerOpciones();
+  } catch (e) { fallo(e); }
 }
 cargarOpciones(true);
 
@@ -248,7 +263,7 @@ function calc() {
 }
 $('#asist').oninput = $('#falt').oninput = calc;
 
-/* ---------- Foto: se reduce a 1280 px para subirla rápido ---------- */
+/* ---------- Foto: se reduce a 1280 px ---------- */
 function leerFoto(file) {
   return new Promise((res, rej) => {
     if (!file) return res(null);
@@ -292,21 +307,25 @@ $('#btnGuardar').onclick = async () => {
   if (d.salida <= d.inicio) return aviso('La hora de salida debe ser posterior a la de inicio.', false);
 
   $('#btnGuardar').disabled = true;
-  try { d.foto = await leerFoto($('#foto').files[0]); } catch (e) { return fallo(e); }
-  google.script.run.withSuccessHandler(r => {
+  try { 
+    d.foto = await leerFoto($('#foto').files[0]); 
+    const r = await apiCall('guardarReporte', d);
     $('#btnGuardar').disabled = false;
     const pre = r.registrado ? 'Docente registrado y ' : '';
     aviso(r.estado === 'OK' ? pre + 'reporte guardado (fila ' + r.fila + ').' : pre + 'reporte guardado con alertas: ' + r.alertas, r.estado === 'OK');
     ['asist','falt','tema','impacto','obs','inicio','salida','nNombres','nApellidos','nCedula'].forEach(id => $('#' + id).value = '');
     $('#nCond').value = ''; $('#deser').value = 0; $('#foto').value = ''; calc();
     if (r.registrado) { cargarOpciones(false); $('#docente').value = ''; $('#boxNuevo').classList.add('hide'); }
-  }).withFailureHandler(fallo).guardarReporte(d);
+  } catch (e) { fallo(e); }
 };
 
 /* ---------- Lista ---------- */
-function cargarLista() {
+async function cargarLista() {
   $('#tbReg').innerHTML = '<tr><td colspan="11">Cargando…</td></tr>';
-  google.script.run.withSuccessHandler(r => { REGS = r; pintarLista(); }).withFailureHandler(fallo).listarRegistros();
+  try {
+    REGS = await apiCall('listarRegistros');
+    pintarLista();
+  } catch (e) { fallo(e); }
 }
 function pintarLista() {
   const q = $('#fTxt').value.toLowerCase(), e = $('#fEst').value;
@@ -328,20 +347,24 @@ function filas(arr) {
     '</td><td>' + (100 * r[4]).toFixed(1) + '%</td><td>' + r[5] + '</td><td>' + r[6] + '</td><td>' + r[7] + '</td></tr>').join('')
     : '<tr><td colspan="8">Sin datos.</td></tr>';
 }
-function cargarResumen() {
-  google.script.run.withSuccessHandler(r => {
+async function cargarResumen() {
+  try {
+    const r = await apiCall('obtenerResumen', parseInt($('#rDias').value) || 0);
     const k = r.kpi;
     $('#kpis').innerHTML = [['Clases', k.clases], ['Asistentes', k.asist], ['Faltantes', k.falt],
       ['% Asistencia', (100 * k.pct).toFixed(1) + '%'], ['Horas dictadas', k.horas], ['Por revisar', k.rev]]
       .map(x => '<div class="kpi"><b>' + x[1] + '</b><span>' + x[0] + '</span></div>').join('');
     $('#tbDoc').innerHTML = filas(r.docentes); $('#tbLoc').innerHTML = filas(r.localidades);
-  }).withFailureHandler(fallo).obtenerResumen(parseInt($('#rDias').value) || 0);
+  } catch (e) { fallo(e); }
 }
 $('#rDias').onchange = cargarResumen;
 
 /* ---------- Docentes (administración) ---------- */
-function cargarDocentes() {
-  google.script.run.withSuccessHandler(r => { DOCS = r; pintarDocentes(); }).withFailureHandler(fallo).listarDocentesAdmin();
+async function cargarDocentes() {
+  try {
+    DOCS = await apiCall('listarDocentesAdmin');
+    pintarDocentes();
+  } catch (e) { fallo(e); }
 }
 function pintarDocentes() {
   const q = $('#dBuscar').value.toLowerCase(), fl = $('#dFiltro').value;
@@ -363,7 +386,7 @@ function limpiarFormDoc() {
 }
 $('#btnDCancel').onclick = limpiarFormDoc;
 
-$('#tbDocs').onclick = e => {
+$('#tbDocs').onclick = async e => {
   const b = e.target.closest('button'); if (!b) return;
   const ced = b.dataset.c;
   if (b.dataset.a === 'edit') {
@@ -375,33 +398,36 @@ $('#tbDocs').onclick = e => {
     const activar = b.dataset.v === '1', d = DOCS.find(x => x.cedula === ced);
     if (!activar && !confirm('¿Desactivar a ' + d.nombre + '? Dejará de aparecer en la lista de docentes.')) return;
     b.disabled = true;
-    google.script.run.withSuccessHandler(r => {
+    try {
+      const r = await apiCall('cambiarEstadoDocente', { cedula: ced, activo: activar });
       aviso(r.aviso || r.mensaje, !r.aviso); cargarDocentes(); cargarOpciones(false);
-    }).withFailureHandler(fallo).cambiarEstadoDocente(ced, activar);
+    } catch (err) { fallo(err); }
   }
 };
 
-$('#btnDGuardar').onclick = () => {
+$('#btnDGuardar').onclick = async () => {
   const d = { nombre: $('#dNombre').value.trim(), cedula: $('#dCedula').value.replace(/\D/g, ''), condicion: $('#dCond').value };
   if (!d.nombre || !d.cedula) return aviso('Escriba nombre y cédula.', false);
   $('#btnDGuardar').disabled = true; aviso('Guardando y sincronizando con el formulario…', true);
-  google.script.run.withSuccessHandler(r => {
+  try {
+    const r = await apiCall('guardarDocente', d);
     $('#btnDGuardar').disabled = false; aviso(r.aviso || r.mensaje, !r.aviso);
     limpiarFormDoc(); cargarDocentes(); cargarOpciones(false);
-  }).withFailureHandler(fallo).guardarDocente(d);
+  } catch (e) { fallo(e); }
 };
 
 /* ---------- Excel ---------- */
-$('#btnXlsx').onclick = () => {
+$('#btnXlsx').onclick = async () => {
   $('#btnXlsx').disabled = true; aviso('Generando Excel…', true);
-  google.script.run.withSuccessHandler(r => {
+  try {
+    const r = await apiCall('exportarExcel');
     const bin = atob(r.base64), bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
     a.download = r.nombre; document.body.appendChild(a); a.click(); a.remove();
     $('#btnXlsx').disabled = false; aviso('Excel descargado: ' + r.nombre, true);
-  }).withFailureHandler(fallo).exportarExcel();
+  } catch (e) { fallo(e); }
 };
 </script>
 </body>
