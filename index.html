@@ -335,8 +335,20 @@ $('#btnGuardar').onclick = async () => {
     if (!/^\d{6,9}$/.test(d.nuevo.cedula)) return aviso('La cédula debe tener entre 6 y 9 dígitos.', false);
     if (!d.nuevo.condicion) return aviso('Seleccione su condición.', false);
   }
-  const falta = ['nucleo','localidad','fecha','inicio','salida','carrera','asignatura','semestre','seccion','asist','falt','tema','unidad'].find(k => !String(d[k]).trim());
-  if (falta) return aviso('Complete los campos obligatorios (*): carrera, asignatura y sección incluidas.', false);
+  const REQ = {
+    nucleo: ['#nucleo', 'Núcleo'], localidad: ['#localidad', 'Localidad'], fecha: ['#fecha', 'Fecha'],
+    inicio: ['#inicio', 'Hora de inicio'], salida: ['#salida', 'Hora de salida'],
+    carrera: ['#carrera', 'Carrera'], asignatura: ['#asignatura', 'Asignatura'], semestre: ['#asignatura', 'Asignatura (el semestre se completa al elegirla)'],
+    seccion: ['#seccion', 'Sección'], asist: ['#asist', 'Estudiantes asistentes'], falt: ['#falt', 'Estudiantes faltantes'],
+    tema: ['#tema', 'Tema a tratar'], unidad: ['#unidad', 'Unidad']
+  };
+  const falta = Object.keys(REQ).find(k => !String(d[k]).trim());
+  if (falta) {
+    const el = $(REQ[falta][0]);
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.focus();
+    el.style.outline = '2px solid var(--bad)'; setTimeout(() => el.style.outline = '', 4000);
+    return aviso('Falta completar: ' + REQ[falta][1], false);
+  }
   if (d.salida <= d.inicio) return aviso('La hora de salida debe ser posterior a la de inicio.', false);
 
   $('#btnGuardar').disabled = true;
