@@ -222,7 +222,11 @@ async function apiCall(action, payload = {}) {
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
     body: JSON.stringify({ action, payload })
   });
-  const res = await resp.json();
+  const txt = await resp.text();
+  let res;
+  try { res = JSON.parse(txt); } catch (e) {
+    throw new Error('El servidor respondió "' + txt.slice(0, 60).replace(/\s+/g, ' ') + '…" en lugar de datos. Revise la implementación de Apps Script (última versión, acceso "Cualquier persona") y la URL de API_URL.');
+  }
   if (res.status === 'error') throw new Error(res.message);
   return res.data;
 }
