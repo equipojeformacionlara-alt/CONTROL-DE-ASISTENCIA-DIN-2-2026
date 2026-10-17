@@ -1,7 +1,6 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-<base target="_top">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Control de asistencia DIN</title>
@@ -69,17 +68,16 @@
 <body>
 <header>
   <h1>Control de asistencia DIN</h1>
-  <small id="usr"></small>
-  <button class="btn sec" id="btnXlsx">⬇ Descargar Excel</button>
-  <a id="lnkHoja" target="_blank" rel="noopener"><button class="btn sec" type="button">Abrir hoja</button></a>
+  <button class="btn sec hide adm" id="btnXlsx">⬇ Descargar Excel</button>
+  <button class="btn sec" id="btnAcceso">Acceso coordinación</button>
 </header>
 
 <main>
 <nav>
   <button class="on" data-t="registro">Registrar clase</button>
-  <button data-t="lista">Registros</button>
-  <button data-t="resumen">Resumen</button>
-  <button data-t="docentes" id="tabDoc">Docentes</button>
+  <button data-t="lista" class="hide adm">Registros</button>
+  <button data-t="resumen" class="hide adm">Resumen</button>
+  <button data-t="docentes" class="hide adm">Docentes</button>
 </nav>
 
 <!-- ============ REGISTRO ============ -->
@@ -93,7 +91,7 @@
     <div class="full hide box" id="boxNuevo">
       <div class="note" style="margin-bottom:12px">Docente nuevo: complete sus datos. Quedará registrado y la próxima vez aparecerá en la lista.</div>
       <div class="grid">
-        <div><label>Nombres y Apellidos *</label><input id="nNombres" autocomplete="name"></div>
+        <div><label>Nombres y apellidos *</label><input id="nNombres" autocomplete="name"></div>
         <div><label>Cédula (solo números) *</label><input id="nCedula" inputmode="numeric" maxlength="10"></div>
         <div><label>Condición *</label><select id="nCond"></select></div>
       </div>
@@ -107,9 +105,14 @@
     <div><label>Fecha *</label><input type="date" id="fecha"></div>
     <div><label>Hora de inicio *</label><input type="time" id="inicio"></div>
     <div><label>Hora de salida *</label><input type="time" id="salida"></div>
-    <div><label>Semestre *</label><select id="semestre"></select></div>
-    <div><label>Código de carrera *</label><select id="carrera"></select></div>
-    <div><label>N° de sección *</label><select id="seccion"></select></div>
+  </div>
+
+  <h3>Carrera, asignatura y sección</h3>
+  <div class="grid">
+    <div><label>Carrera *</label><select id="carrera"></select></div>
+    <div><label>Asignatura *</label><select id="asignatura" disabled></select></div>
+    <div><label>Semestre (automático)</label><input id="semestre" readonly placeholder="Se completa al elegir la asignatura"></div>
+    <div><label>Sección *</label><select id="seccion" disabled></select></div>
   </div>
 
   <h3>Asistencia</h3>
@@ -126,6 +129,7 @@
     <div><label>Unidad *</label><select id="unidad"></select></div>
     <div class="full"><label>Impacto causado en los estudiantes</label><textarea id="impacto"></textarea></div>
     <div class="full"><label>Observación (novedad si amerita)</label><textarea id="obs"></textarea></div>
+    <div class="full"><label>Reseña fotográfica (imagen)</label><input type="file" id="foto" accept="image/*"></div>
   </div>
 
   <p style="margin-top:20px"><button class="btn" id="btnGuardar">Guardar reporte</button></p>
@@ -135,16 +139,27 @@
 <section id="lista">
   <div class="bar">
     <div><label>Buscar docente / sección</label><input id="fTxt" placeholder="Escriba para filtrar"></div>
+    <div><label>Estado</label>
+      <select id="fEst"><option value="">Todos</option><option>OK</option><option>REVISAR</option></select></div>
+    <div style="flex:0"><button class="btn sec" id="btnRef">Actualizar</button></div>
   </div>
   <div class="tw"><table>
-    <thead><tr><th>Fila</th><th>Fecha</th><th>Docente</th><th>Localidad</th><th>Carrera</th><th>Sec.</th><th>Asist.</th><th>Falt.</th></tr></thead>
-    <tbody id="tbReg"><tr><td colspan="8">Sin registros.</td></tr></tbody>
+    <thead><tr><th>Fila</th><th>Fecha</th><th>Docente</th><th>Localidad</th><th>Carrera</th><th>Sec.</th><th>Asist.</th><th>Falt.</th><th>%</th><th>Estado</th><th>Alertas</th></tr></thead>
+    <tbody id="tbReg"><tr><td colspan="11">Cargando…</td></tr></tbody>
   </table></div>
 </section>
 
 <!-- ============ RESUMEN ============ -->
 <section id="resumen">
+  <div class="bar">
+    <div><label>Período</label>
+      <select id="rDias"><option value="7">Últimos 7 días</option><option value="30" selected>Últimos 30 días</option><option value="90">Últimos 90 días</option><option value="0">Todo</option></select></div>
+  </div>
   <div class="kpis" id="kpis"></div>
+  <h3>Por docente</h3>
+  <div class="tw"><table><thead><tr><th>Docente</th><th>Clases</th><th>Asist.</th><th>Falt.</th><th>% Asist.</th><th>Deserción</th><th>Horas</th><th>Por revisar</th></tr></thead><tbody id="tbDoc"></tbody></table></div>
+  <h3>Por localidad</h3>
+  <div class="tw"><table><thead><tr><th>Localidad</th><th>Clases</th><th>Asist.</th><th>Falt.</th><th>% Asist.</th><th>Deserción</th><th>Horas</th><th>Por revisar</th></tr></thead><tbody id="tbLoc"></tbody></table></div>
 </section>
 
 <!-- ============ DOCENTES (ADMIN) ============ -->
@@ -163,26 +178,45 @@
   <h3>Lista de docentes</h3>
   <div class="bar">
     <div><label>Buscar</label><input id="dBuscar" placeholder="Nombre o cédula"></div>
+    <div><label>Mostrar</label>
+      <select id="dFiltro"><option value="">Todos</option><option value="1">Activos</option><option value="0">Inactivos</option></select></div>
   </div>
   <div class="tw"><table>
-    <thead><tr><th>Nombre</th><th>Cédula</th><th>Condición</th><th>Estado</th><th>Acciones</th></tr></thead>
-    <tbody id="tbDocs"><tr><td colspan="5">Cargando…</td></tr></tbody>
+    <thead><tr><th>Nombre</th><th>Cédula</th><th>Condición</th><th>Estado</th><th>Alta</th><th></th></tr></thead>
+    <tbody id="tbDocs"><tr><td colspan="6">Cargando…</td></tr></tbody>
   </table></div>
+  <p class="note" style="margin-top:14px">Los cambios se reflejan automáticamente en la lista del formulario de Google. Un docente desactivado deja de aparecer, pero sus reportes anteriores se conservan.</p>
 </section>
 </main>
 <div id="msg"></div>
 
 <script>
 const API_URL = "https://script.google.com/macros/s/AKfycbw07o1mU-g27Zp-iXJC67NWDuWr56fAlFHsKTSv0RyjvDrqo1ArKM2RrCr0pWGofInY/exec";
+const COND = ['TV', 'MT', 'TC', 'DE'];
+const NAC = ['CINU', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII'];
+const SEMN = ['CINU', '1er semestre', '2do semestre', '3er semestre', '4to semestre', '5to semestre', '6to semestre', '7mo semestre', '8vo semestre'];
+const rep = a => { const o = { '00': a }; for (let i = 1; i <= 8; i++) o['0' + i] = 'D1 D2'; return o; };
+/* c = código, n = nombre, t = L (larga: CINU–VIII) / C (corta: CINU–IV), s = secciones por semestre */
+const CARRERAS = [
+  { c: '2613', n: 'SISTEMAS', t: 'L', s: { '00': 'D1 D2 D3 N1 N2', '01': 'D1 D2 D3 D4 D5 N1', '02': 'D1 D2', '03': 'D1 D2', '04': 'D1 D2 N1', '05': 'D1 N1', '06': 'D1 N1', '07': 'D1 N1', '08': 'D1 N1' } },
+  { c: '0913', n: 'ADMINISTRACIÓN', t: 'L', s: rep('D1 D2 D3') },
+  { c: '2213', n: 'ELÉCTRICA', t: 'L', s: rep('D1 D2 D3') },
+  { c: '1013', n: 'ECONOMÍA', t: 'L', s: rep('D1 D2 D3') },
+  { c: '2013', n: 'AGRONOMÍA', t: 'L', s: rep('D1 D2') },
+  { c: '0313', n: 'ENFERMERÍA', t: 'C', s: { '00': 'D1 D2 D3 D4 D5 D6 D7', '01': 'D1 D2 D3 D4', '02': 'D1 D2 D3 D4 D5', '03': 'D1 D2 D3 D4 D5 D6 D7', '04': 'D1 D2 D3 D4 D5 D6 D7' } }
+];
+const asignaturas = c => NAC.slice(0, c.t === 'C' ? 5 : 9)
+  .map((r, i) => [i, i === 0 ? 'DEFENSA INTEGRAL CINU' : 'DEFENSA INTEGRAL DE LA NACIÓN ' + r]);
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-let REGS = [], DOCS = [], msgT;
+let CLAVE = '', REGS = [], DOCS = [], SEM = '', msgT;
+try { CLAVE = sessionStorage.getItem('clave') || ''; } catch (e) {}
 
 async function apiCall(action, payload = {}) {
+  if (CLAVE) payload.clave = CLAVE;
   const resp = await fetch(API_URL, {
-    method: 'POST',
-    mode: 'cors',
+    method: 'POST', mode: 'cors',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
     body: JSON.stringify({ action, payload })
   });
@@ -190,104 +224,243 @@ async function apiCall(action, payload = {}) {
   if (res.status === 'error') throw new Error(res.message);
   return res.data;
 }
-
 function aviso(txt, ok) {
   const m = $('#msg'); m.textContent = txt; m.className = ok ? 'ok' : 'bad';
   clearTimeout(msgT); msgT = setTimeout(() => m.className = '', 7000);
 }
 function fallo(e) {
   aviso('Error: ' + (e && e.message ? e.message : e), false);
+  ['#btnGuardar', '#btnXlsx', '#btnDGuardar'].forEach(s => $(s).disabled = false);
 }
-function llenar(id, lista, vacio) {
+function fill(id, items, vacio) {
   $(id).innerHTML = (vacio ? '<option value="">' + vacio + '</option>' : '') +
-    lista.map(x => '<option value="' + esc(x) + '">' + esc(x) + '</option>').join('');
+    items.map(x => { const v = Array.isArray(x) ? x[0] : x, t = Array.isArray(x) ? x[1] : x;
+      return '<option value="' + esc(v) + '">' + esc(t) + '</option>'; }).join('');
 }
 
+/* ---------- Pestañas ---------- */
 document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
   document.querySelectorAll('nav button,section').forEach(e => e.classList.remove('on'));
   b.classList.add('on'); $('#' + b.dataset.t).classList.add('on');
+  if (b.dataset.t === 'lista') cargarLista();
+  if (b.dataset.t === 'resumen') cargarResumen();
   if (b.dataset.t === 'docentes') cargarDocentes();
 });
 
+/* ---------- Opciones ---------- */
 async function cargarOpciones(inicial) {
   try {
-    const o = await apiCall('obtenerOpciones');
-    const cat = o.catalogos;
-    $('#docente').innerHTML = '<option value="">Seleccione…</option>' +
-      o.docentes.map(d => '<option value="' + esc(d.id) + '">' + esc(d.label) + '</option>').join('') +
-      '<option value="__nuevo">Mi nombre no aparece (registrarme como docente nuevo)</option>';
+    const o = await apiCall('obtenerOpciones'), actual = $('#docente').value;
+    fill('#docente', o.docentes.map(d => [d.id, d.label])
+      .concat([['__nuevo', 'Mi nombre no aparece (registrarme como docente nuevo)']]), 'Seleccione…');
+    if (actual) $('#docente').value = actual;
     if (inicial) {
-      llenar('#nucleo', cat.nucleos); 
-      llenar('#localidad', cat.localidades, 'Seleccione…');
-      llenar('#semestre', cat.semestres, 'Seleccione…'); 
-      llenar('#carrera', cat.carreras, 'Seleccione…');
-      llenar('#seccion', cat.secciones, 'Seleccione…'); 
-      llenar('#unidad', cat.unidades, 'Seleccione…');
-      llenar('#nCond', cat.condiciones, 'Seleccione…'); 
-      llenar('#dCond', cat.condiciones, '(sin definir)');
+      const cat = o.catalogos;
+      fill('#nucleo', cat.nucleos); fill('#localidad', cat.localidades, 'Seleccione…');
+      fill('#unidad', cat.unidades, 'Seleccione…');
+      fill('#carrera', CARRERAS.map(c => [c.c, c.n + ' (' + c.c + ')']), 'Seleccione…');
+      fill('#asignatura', [], 'Primero elija la carrera'); fill('#seccion', [], 'Primero elija la asignatura');
+      fill('#nCond', COND, 'Seleccione…'); fill('#dCond', COND, '(sin definir)');
       const h = new Date(); h.setMinutes(h.getMinutes() - h.getTimezoneOffset());
       $('#fecha').value = h.toISOString().slice(0, 10);
     }
   } catch (e) { fallo(e); }
 }
 cargarOpciones(true);
-
 $('#docente').onchange = e => $('#boxNuevo').classList.toggle('hide', e.target.value !== '__nuevo');
 
-$('#btnGuardar').onclick = async () => {
-  const sel = $('#docente').value;
-  if (!sel) return aviso('Seleccione un docente.', false);
-  const d = {
-    docenteId: sel,
-    fecha: $('#fecha').value, inicio: $('#inicio').value, salida: $('#salida').value,
-    nucleo: $('#nucleo').value, localidad: $('#localidad').value,
-    semestre: $('#semestre').value, carrera: $('#carrera').value, seccion: $('#seccion').value,
-    asist: $('#asist').value, falt: $('#falt').value, deser: $('#deser').value || 0,
-    tema: $('#tema').value, unidad: $('#unidad').value, impacto: $('#impacto').value, obs: $('#obs').value
-  };
-  try {
-    await apiCall('guardarReporte', d);
-    aviso('Reporte guardado con éxito.', true);
-  } catch (e) { fallo(e); }
+/* ---------- Carrera → Asignatura → Semestre → Sección ---------- */
+const carreraSel = () => CARRERAS.find(x => x.c === $('#carrera').value);
+function limpiarSeccion(msg) { SEM = ''; $('#semestre').value = ''; fill('#seccion', [], msg); $('#seccion').disabled = true; }
+$('#carrera').onchange = () => {
+  const c = carreraSel();
+  fill('#asignatura', c ? asignaturas(c) : [], c ? 'Seleccione…' : 'Primero elija la carrera');
+  $('#asignatura').disabled = !c;
+  limpiarSeccion('Primero elija la asignatura');
+};
+$('#asignatura').onchange = () => {
+  const c = carreraSel(), v = $('#asignatura').value;
+  if (!c || v === '') return limpiarSeccion('Primero elija la asignatura');
+  const n = String(v).padStart(2, '0'); SEM = n + 'S';
+  $('#semestre').value = SEMN[+v] + ' (' + SEM + ')';
+  const sec = (c.s[n] || '').split(' ').filter(Boolean).map(x => SEM + '-' + c.c + '-' + x);
+  fill('#seccion', sec, sec.length ? 'Seleccione…' : 'Sin secciones registradas');
+  $('#seccion').disabled = !sec.length;
 };
 
-async function cargarDocentes() {
+function calc() {
+  const a = parseInt($('#asist').value), f = parseInt($('#falt').value);
+  if (isNaN(a) || isNaN(f)) { $('#calc').textContent = 'Total: – · Asistencia: –'; return; }
+  const t = a + f;
+  $('#calc').textContent = 'Total: ' + t + ' · Asistencia: ' + (t ? (100 * a / t).toFixed(1) + '%' : '–');
+}
+$('#asist').oninput = $('#falt').oninput = calc;
+
+/* ---------- Foto (se reduce a 1280 px) ---------- */
+function leerFoto(file) {
+  return new Promise((res, rej) => {
+    if (!file) return res(null);
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const k = Math.min(1, 1280 / Math.max(img.width, img.height)), cv = document.createElement('canvas');
+      cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k);
+      cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height); URL.revokeObjectURL(url);
+      res({ data: cv.toDataURL('image/jpeg', 0.82), nombre: file.name.replace(/\.\w+$/, '') + '.jpg', tipo: 'image/jpeg' });
+    };
+    img.onerror = () => rej(new Error('No se pudo leer la imagen'));
+    img.src = url;
+  });
+}
+
+/* ---------- Guardar reporte ---------- */
+$('#btnGuardar').onclick = async () => {
+  const sel = $('#docente').value, c = carreraSel();
+  const d = {
+    docenteId: sel === '__nuevo' ? '' : sel, nuevo: null,
+    nucleo: $('#nucleo').value, localidad: $('#localidad').value, fecha: $('#fecha').value,
+    inicio: $('#inicio').value, salida: $('#salida').value,
+    carrera: c ? c.c : '', asignatura: $('#asignatura').value === '' ? '' : $('#asignatura').selectedOptions[0].textContent,
+    semestre: SEM, seccion: $('#seccion').value,
+    asist: $('#asist').value, falt: $('#falt').value, deser: $('#deser').value || 0,
+    tema: $('#tema').value.trim(), unidad: $('#unidad').value,
+    impacto: $('#impacto').value.trim(), obs: $('#obs').value.trim()
+  };
+  if (!sel) return aviso('Seleccione su nombre en la lista o regístrese como docente nuevo.', false);
+  if (sel === '__nuevo') {
+    d.nuevo = { nombres: $('#nNombres').value.trim(), apellidos: '', cedula: $('#nCedula').value.replace(/\D/g, ''), condicion: $('#nCond').value };
+    if (d.nuevo.nombres.split(/\s+/).length < 2) return aviso('Escriba sus nombres y apellidos.', false);
+    if (!/^\d{6,9}$/.test(d.nuevo.cedula)) return aviso('La cédula debe tener entre 6 y 9 dígitos.', false);
+    if (!d.nuevo.condicion) return aviso('Seleccione su condición.', false);
+  }
+  const falta = ['nucleo','localidad','fecha','inicio','salida','carrera','asignatura','semestre','seccion','asist','falt','tema','unidad'].find(k => !String(d[k]).trim());
+  if (falta) return aviso('Complete los campos obligatorios (*): carrera, asignatura y sección incluidas.', false);
+  if (d.salida <= d.inicio) return aviso('La hora de salida debe ser posterior a la de inicio.', false);
+
+  $('#btnGuardar').disabled = true;
   try {
-    DOCS = await apiCall('listarDocentesAdmin');
-    pintarDocentes();
+    d.foto = await leerFoto($('#foto').files[0]);
+    const r = await apiCall('guardarReporte', d);
+    const pre = r.registrado ? 'Docente registrado y ' : '';
+    aviso(r.estado === 'OK' ? pre + 'reporte guardado.' : pre + 'reporte guardado con alertas: ' + r.alertas, r.estado === 'OK');
+    ['asist', 'falt', 'tema', 'impacto', 'obs', 'inicio', 'salida', 'nNombres', 'nCedula'].forEach(id => $('#' + id).value = '');
+    $('#deser').value = 0; $('#foto').value = ''; $('#seccion').value = ''; calc();
+    if (r.registrado) { $('#docente').value = ''; $('#boxNuevo').classList.add('hide'); cargarOpciones(false); }
+  } catch (e) { fallo(e); }
+  $('#btnGuardar').disabled = false;
+};
+
+/* ---------- Acceso coordinación ---------- */
+function modoAdmin(on) {
+  document.querySelectorAll('.adm').forEach(e => e.classList.toggle('hide', !on));
+  $('#btnAcceso').textContent = on ? 'Cerrar sesión' : 'Acceso coordinación';
+}
+$('#btnAcceso').onclick = async () => {
+  if (CLAVE) {
+    CLAVE = ''; try { sessionStorage.removeItem('clave'); } catch (e) {}
+    modoAdmin(false); document.querySelector('nav button[data-t=registro]').click(); return;
+  }
+  const k = prompt('Clave de coordinación:'); if (!k) return;
+  CLAVE = k;
+  try { await apiCall('verificarClave'); try { sessionStorage.setItem('clave', k); } catch (e) {} modoAdmin(true); aviso('Acceso concedido.', true); }
+  catch (e) { CLAVE = ''; fallo(e); }
+};
+if (CLAVE) apiCall('verificarClave').then(() => modoAdmin(true)).catch(() => { CLAVE = ''; });
+
+/* ---------- Registros ---------- */
+async function cargarLista() {
+  $('#tbReg').innerHTML = '<tr><td colspan="11">Cargando…</td></tr>';
+  try { REGS = await apiCall('listarRegistros'); pintarLista(); } catch (e) { fallo(e); }
+}
+function pintarLista() {
+  const q = $('#fTxt').value.toLowerCase(), e = $('#fEst').value;
+  const f = REGS.filter(r => (!e || r.estado === e) && (!q || (r.docente + ' ' + r.seccion + ' ' + r.carrera + ' ' + r.localidad).toLowerCase().includes(q)));
+  $('#tbReg').innerHTML = f.length ? f.map(r =>
+    '<tr><td>' + r.fila + '</td><td>' + esc(r.fecha) + '</td><td>' + esc(r.docente) + '</td><td>' + esc(r.localidad) +
+    '</td><td>' + esc(r.carrera) + '</td><td>' + esc(r.seccion) + '</td><td>' + esc(r.asist) + '</td><td>' + esc(r.falt) +
+    '</td><td>' + esc(r.pct) + '</td><td><span class="tag ' + esc(r.estado) + '">' + esc(r.estado) +
+    '</span></td><td class="wrap">' + esc(r.alertas) + '</td></tr>').join('')
+    : '<tr><td colspan="11">Sin registros.</td></tr>';
+}
+$('#fTxt').oninput = $('#fEst').onchange = pintarLista;
+$('#btnRef').onclick = cargarLista;
+
+/* ---------- Resumen ---------- */
+const filas = arr => arr.length ? arr.map(r => '<tr><td>' + esc(r[0]) + '</td><td>' + r[1] + '</td><td>' + r[2] + '</td><td>' + r[3] +
+  '</td><td>' + (100 * r[4]).toFixed(1) + '%</td><td>' + r[5] + '</td><td>' + r[6] + '</td><td>' + r[7] + '</td></tr>').join('')
+  : '<tr><td colspan="8">Sin datos.</td></tr>';
+async function cargarResumen() {
+  try {
+    const r = await apiCall('obtenerResumen', { dias: parseInt($('#rDias').value) || 0 }), k = r.kpi;
+    $('#kpis').innerHTML = [['Clases', k.clases], ['Asistentes', k.asist], ['Faltantes', k.falt],
+      ['% Asistencia', (100 * k.pct).toFixed(1) + '%'], ['Horas dictadas', k.horas], ['Por revisar', k.rev]]
+      .map(x => '<div class="kpi"><b>' + x[1] + '</b><span>' + x[0] + '</span></div>').join('');
+    $('#tbDoc').innerHTML = filas(r.docentes); $('#tbLoc').innerHTML = filas(r.localidades);
   } catch (e) { fallo(e); }
 }
+$('#rDias').onchange = cargarResumen;
+
+/* ---------- Docentes (coordinación) ---------- */
+async function cargarDocentes() {
+  try { DOCS = await apiCall('listarDocentesAdmin'); pintarDocentes(); } catch (e) { fallo(e); }
+}
 function pintarDocentes() {
-  const q = $('#dBuscar').value.toLowerCase();
-  const f = DOCS.filter(d => (!q || (d.nombre + ' ' + d.cedula).toLowerCase().includes(q)));
+  const q = $('#dBuscar').value.toLowerCase(), fl = $('#dFiltro').value;
+  const f = DOCS.filter(d => (fl === '' || (fl === '1') === d.activo) && (!q || (d.nombre + ' ' + d.cedula).toLowerCase().includes(q)));
   $('#tbDocs').innerHTML = f.length ? f.map(d =>
     '<tr><td>' + esc(d.nombre) + '</td><td>' + esc(d.cedula) + '</td><td>' + esc(d.condicion) +
     '</td><td><span class="tag ' + (d.activo ? 'OK' : 'REVISAR') + '">' + (d.activo ? 'Activo' : 'Inactivo') +
-    '</span></td><td>' +
+    '</span></td><td>' + esc(d.alta) + '</td><td>' +
+    '<button class="mini" data-a="edit" data-c="' + esc(d.cedula) + '">Editar</button>' +
     '<button class="mini" data-a="toggle" data-c="' + esc(d.cedula) + '" data-v="' + (d.activo ? 0 : 1) + '">' +
     (d.activo ? 'Desactivar' : 'Activar') + '</button></td></tr>').join('')
-    : '<tr><td colspan="5">Sin docentes.</td></tr>';
+    : '<tr><td colspan="6">Sin docentes.</td></tr>';
 }
-$('#dBuscar').oninput = pintarDocentes;
-
+$('#dBuscar').oninput = $('#dFiltro').onchange = pintarDocentes;
+function limpiarFormDoc() {
+  $('#dNombre').value = ''; $('#dCedula').value = ''; $('#dCond').value = ''; $('#dCedula').readOnly = false;
+  $('#dTitulo').textContent = 'Agregar docente'; $('#btnDCancel').classList.add('hide');
+}
+$('#btnDCancel').onclick = limpiarFormDoc;
 $('#tbDocs').onclick = async e => {
   const b = e.target.closest('button'); if (!b) return;
-  const ced = b.dataset.c, activar = b.dataset.v === '1';
-  try {
-    await apiCall('cambiarEstadoDocente', { cedula: ced, activo: activar });
-    cargarDocentes(); cargarOpciones(false);
-  } catch (err) { fallo(err); }
+  const ced = b.dataset.c, d = DOCS.find(x => x.cedula === ced); if (!d) return;
+  if (b.dataset.a === 'edit') {
+    $('#dNombre').value = d.nombre; $('#dCedula').value = d.cedula; $('#dCedula').readOnly = true;
+    $('#dCond').value = COND.includes(d.condicion) ? d.condicion : ''; $('#dTitulo').textContent = 'Editar docente';
+    $('#btnDCancel').classList.remove('hide'); window.scrollTo({ top: 0, behavior: 'smooth' });
+  } else {
+    const activar = b.dataset.v === '1';
+    if (!activar && !confirm('¿Desactivar a ' + d.nombre + '? Dejará de aparecer en la lista.')) return;
+    b.disabled = true;
+    try {
+      const r = await apiCall('cambiarEstadoDocente', { cedula: ced, activo: activar });
+      aviso(r.aviso || r.mensaje, !r.aviso); cargarDocentes(); cargarOpciones(false);
+    } catch (err) { fallo(err); }
+  }
 };
-
 $('#btnDGuardar').onclick = async () => {
   const d = { nombre: $('#dNombre').value.trim(), cedula: $('#dCedula').value.replace(/\D/g, ''), condicion: $('#dCond').value };
   if (!d.nombre || !d.cedula) return aviso('Escriba nombre y cédula.', false);
+  $('#btnDGuardar').disabled = true;
   try {
     const r = await apiCall('guardarDocente', d);
-    aviso(r.mensaje, true);
-    $('#dNombre').value = ''; $('#dCedula').value = '';
-    cargarDocentes(); cargarOpciones(false);
+    aviso(r.aviso || r.mensaje, !r.aviso); limpiarFormDoc(); cargarDocentes(); cargarOpciones(false);
   } catch (e) { fallo(e); }
+  $('#btnDGuardar').disabled = false;
+};
+
+/* ---------- Excel ---------- */
+$('#btnXlsx').onclick = async () => {
+  $('#btnXlsx').disabled = true; aviso('Generando Excel…', true);
+  try {
+    const r = await apiCall('exportarExcel'), bin = atob(r.base64), bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+    a.download = r.nombre; document.body.appendChild(a); a.click(); a.remove();
+    aviso('Excel descargado: ' + r.nombre, true);
+  } catch (e) { fallo(e); }
+  $('#btnXlsx').disabled = false;
 };
 </script>
 </body>
