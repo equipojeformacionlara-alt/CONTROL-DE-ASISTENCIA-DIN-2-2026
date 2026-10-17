@@ -118,7 +118,7 @@
   <h3>Asistencia</h3>
   <div class="grid">
     <div><label>Estudiantes asistentes *</label><input type="number" id="asist" min="0" max="9999" inputmode="numeric"></div>
-    <div><label>Estudiantes faltantes *</label><input type="number" id="falt" min="0" max="9999" inputmode="numeric"></div>
+    <div><label>Estudiantes faltantes *</label><input type="number" id="falt" min="0" max="9999" value="0" inputmode="numeric"></div>
     <div><label>Deserción estudiantil *</label><input type="number" id="deser" min="0" max="9999" value="0" inputmode="numeric"></div>
     <div class="calc" id="calc">Total: – · Asistencia: –</div>
   </div>
@@ -358,7 +358,7 @@ $('#btnGuardar').onclick = async () => {
     const pre = r.registrado ? 'Docente registrado y ' : '';
     aviso(r.estado === 'OK' ? pre + 'reporte guardado.' : pre + 'reporte guardado con alertas: ' + r.alertas, r.estado === 'OK');
     ['asist', 'falt', 'tema', 'impacto', 'obs', 'inicio', 'salida', 'nNombres', 'nCedula'].forEach(id => $('#' + id).value = '');
-    $('#deser').value = 0; $('#foto').value = ''; $('#seccion').value = ''; calc();
+    $('#deser').value = 0; $('#falt').value = 0; $('#foto').value = ''; $('#seccion').value = ''; calc();
     if (r.registrado) { $('#docente').value = ''; $('#boxNuevo').classList.add('hide'); cargarOpciones(false); }
   } catch (e) { fallo(e); }
   $('#btnGuardar').disabled = false;
